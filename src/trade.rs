@@ -1,0 +1,89 @@
+use crate::order::Side;
+use crate::types::{OrderId, Price, Quantity, UserId};
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Trade {
+    maker_order_id: OrderId,
+    taker_order_id: OrderId,
+    maker_user_id: UserId,
+    taker_user_id: UserId,
+    taker_side: Side,
+    price: Price,
+    quantity: Quantity,
+}
+
+impl Trade {
+    pub(crate) fn new(
+        maker_order_id: OrderId,
+        taker_order_id: OrderId,
+        maker_user_id: UserId,
+        taker_user_id: UserId,
+        taker_side: Side,
+        price: Price,
+        quantity: Quantity,
+    ) -> Self {
+        Self {
+            maker_order_id,
+            taker_order_id,
+            maker_user_id,
+            taker_user_id,
+            taker_side,
+            price,
+            quantity,
+        }
+    }
+
+    pub fn maker_order_id(&self) -> OrderId {
+        self.maker_order_id
+    }
+
+    pub fn taker_order_id(&self) -> OrderId {
+        self.taker_order_id
+    }
+
+    pub fn maker_user_id(&self) -> UserId {
+        self.maker_user_id
+    }
+
+    pub fn taker_user_id(&self) -> UserId {
+        self.taker_user_id
+    }
+
+    pub fn taker_side(&self) -> Side {
+        self.taker_side
+    }
+
+    pub fn price(&self) -> Price {
+        self.price
+    }
+
+    pub fn quantity(&self) -> Quantity {
+        self.quantity
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_trade_preserves_its_execution_details() {
+        let trade = Trade::new(
+            OrderId::new(1),
+            OrderId::new(2),
+            UserId::new(3),
+            UserId::new(4),
+            Side::Buy,
+            Price::new(4).unwrap(),
+            Quantity::new(100),
+        );
+
+        assert_eq!(trade.maker_order_id(), OrderId::new(1));
+        assert_eq!(trade.taker_order_id(), OrderId::new(2));
+        assert_eq!(trade.maker_user_id(), UserId::new(3));
+        assert_eq!(trade.taker_user_id(), UserId::new(4));
+        assert_eq!(trade.taker_side(), Side::Buy);
+        assert_eq!(trade.price(), Price::new(4).unwrap());
+        assert_eq!(trade.quantity(), Quantity::new(100));
+    }
+}

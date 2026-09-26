@@ -8,6 +8,32 @@ use crate::trade::Trade;
 use crate::types::{OrderId, Price, Quantity, UserId};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketOrderRequest {
+    Buy {
+        quantity: Quantity,
+        max_quote_amount: AssetAmount,
+    },
+    Sell {
+        quantity: Quantity,
+    },
+}
+
+impl MarketOrderRequest {
+    fn side(self) -> Side {
+        match self {
+            Self::Buy { .. } => Side::Buy,
+            Self::Sell { .. } => Side::Sell,
+        }
+    }
+
+    fn quantity(self) -> Quantity {
+        match self {
+            Self::Buy { quantity, .. } | Self::Sell { quantity } => quantity,
+        }
+    }
+}
+
 pub struct OrderPlacementResult {
     order_id: OrderId,
     outcome: PlacementResult,
@@ -50,6 +76,8 @@ pub enum ExchangeError {
     SettlementInvariantViolation,
     Cancel(CancelError),
     OrderNotOwnedByUser,
+    ZeroMarketBuyBudget,
+    MarketBuyBudgetExceeded,
 }
 
 impl Exchange {
@@ -151,11 +179,37 @@ impl Exchange {
         }
     }
 
+    fn required_market_lock(
+        &self,
+        pair: &TradingPair,
+        request: MarketOrderRequest,
+    ) -> Result<(AssetSymbol, AssetAmount), ExchangeError> {
+        let market = self.market(pair).ok_or(ExchangeError::UnknownMarket)?;
+
+        market
+            .validate_market_order(request.quantity())
+            .map_err(ExchangeError::MarketOrder)?;
+
+        match request {
+            MarketOrderRequest::Buy {
+                max_quote_amount, ..
+            } => {
+                if max_quote_amount.value() == 0 {
+                    return Err(ExchangeError::ZeroMarketBuyBudget);
+                }
+                Ok(((pair.quote().clone()), max_quote_amount))
+            }
+            MarketOrderRequest::Sell { quantity, .. } => {
+                Ok((pair.base().clone(), AssetAmount::new(quantity.value())))
+            }
+        }
+    }
+
     fn settle_generated_trade(
         staged_ledger: &mut Ledger,
         market: &Market,
         pair: &TradingPair,
-        incoming_limit_price: Price,
+        incoming_limit_price: Option<Price>,
         trade: &Trade,
     ) -> Result<(), ExchangeError> {
         let (buyer_id, seller_id) = match trade.taker_side() {
@@ -169,16 +223,16 @@ impl Exchange {
             .calculate_quote_amount(trade.price(), trade.quantity())
             .map_err(ExchangeError::QuoteAmount)?;
 
-        let buyer_quote_refund = match trade.taker_side() {
-            Side::Buy => {
+        let buyer_quote_refund = match (trade.taker_side(), incoming_limit_price) {
+            (Side::Buy, Some(limit_price)) => {
                 let reserved_quote = market
-                    .calculate_quote_amount(incoming_limit_price, trade.quantity())
+                    .calculate_quote_amount(limit_price, trade.quantity())
                     .map_err(ExchangeError::QuoteAmount)?;
                 reserved_quote
                     .checked_sub(quote_amount)
                     .ok_or(ExchangeError::SettlementInvariantViolation)?
             }
-            Side::Sell => AssetAmount::new(0),
+            _ => AssetAmount::new(0),
         };
 
         staged_ledger
@@ -223,8 +277,97 @@ impl Exchange {
             .place_limit_order(order_id, user_id, side, price, quantity)
             .map_err(ExchangeError::MarketOrder)?;
 
+        let incoming_buy_limit_price = match side {
+            Side::Buy => Some(price),
+            Side::Sell => None,
+        };
+
         for trade in outcome.trades() {
-            Self::settle_generated_trade(&mut staged_ledger, &staged_market, pair, price, trade)?;
+            Self::settle_generated_trade(
+                &mut staged_ledger,
+                &staged_market,
+                pair,
+                incoming_buy_limit_price,
+                trade,
+            )?;
+        }
+
+        self.ledger = staged_ledger;
+        self.markets.insert(pair.clone(), staged_market);
+        self.next_order_id = following_order_id;
+
+        Ok(OrderPlacementResult { order_id, outcome })
+    }
+
+    pub fn place_market_order(
+        &mut self,
+        user_id: UserId,
+        pair: &TradingPair,
+        request: MarketOrderRequest,
+    ) -> Result<OrderPlacementResult, ExchangeError> {
+        let (lock_asset, lock_amount) = self.required_market_lock(pair, request)?;
+        let following_order_id = self
+            .next_order_id
+            .checked_add(1)
+            .ok_or(ExchangeError::OrderIdExhausted)?;
+        let order_id = OrderId::new(self.next_order_id);
+
+        let mut staged_ledger = self.ledger.clone();
+        let mut staged_market = self
+            .markets
+            .get(pair)
+            .ok_or(ExchangeError::UnknownMarket)?
+            .clone();
+        staged_ledger
+            .lock(user_id, &lock_asset, lock_amount)
+            .map_err(ExchangeError::Ledger)?;
+
+        let outcome = staged_market
+            .place_market_order(order_id, user_id, request.side(), request.quantity())
+            .map_err(ExchangeError::MarketOrder)?;
+
+        let mut total_quote_amount = AssetAmount::new(0);
+
+        for trade in outcome.trades() {
+            let trade_quote_amount = staged_market
+                .calculate_quote_amount(trade.price(), trade.quantity())
+                .map_err(ExchangeError::QuoteAmount)?;
+            total_quote_amount = total_quote_amount
+                .checked_add(trade_quote_amount)
+                .ok_or(ExchangeError::QuoteAmount(QuoteAmountError::Overflow))?;
+        }
+
+        if let MarketOrderRequest::Buy {
+            max_quote_amount, ..
+        } = request
+        {
+            if total_quote_amount.value() > max_quote_amount.value() {
+                return Err(ExchangeError::MarketBuyBudgetExceeded);
+            }
+        }
+
+        for trade in outcome.trades() {
+            Self::settle_generated_trade(&mut staged_ledger, &staged_market, pair, None, trade)?;
+        }
+
+        match request {
+            MarketOrderRequest::Buy {
+                max_quote_amount, ..
+            } => {
+                let unused_quote = max_quote_amount
+                    .checked_sub(total_quote_amount)
+                    .ok_or(ExchangeError::SettlementInvariantViolation)?;
+                staged_ledger
+                    .unlock(user_id, pair.quote(), unused_quote)
+                    .map_err(ExchangeError::Ledger)?;
+            }
+            MarketOrderRequest::Sell { .. } => {
+                let unfilled_base = AssetAmount::new(outcome.unfilled_quantity().value());
+
+                staged_ledger
+                    .unlock(user_id, pair.base(), unfilled_base)
+                    .map_err(ExchangeError::Ledger)?;
+            }
         }
 
         self.ledger = staged_ledger;
@@ -1310,5 +1453,270 @@ mod tests {
 
         assert_eq!(pol_usdc_order_book.best_bid(), Some(price_for_pol));
         assert_eq!(eth_usdc_order_book.best_bid(), None);
+    }
+
+    #[test]
+    fn market_buy_settles_liquidity_and_unlocks_unused_budget() {
+        let mut exchange = Exchange::new();
+
+        let eth = AssetSymbol::new("ETH").unwrap();
+        let usdc = AssetSymbol::new("USDC").unwrap();
+
+        exchange
+            .register_asset(Asset::new(eth.clone(), 18).unwrap())
+            .unwrap();
+        exchange
+            .register_asset(Asset::new(usdc.clone(), 6).unwrap())
+            .unwrap();
+
+        let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+
+        exchange
+            .create_market(
+                pair.clone(),
+                Price::new(10_000).unwrap(),
+                Quantity::new(100_000_000_000_000),
+            )
+            .unwrap();
+
+        let alice = UserId::new(1);
+        let bob = UserId::new(2);
+        let carol = UserId::new(3);
+        exchange
+            .deposit(alice, &eth, AssetAmount::new(1_000_000_000_000_000_000))
+            .unwrap();
+        exchange
+            .deposit(carol, &eth, AssetAmount::new(2_000_000_000_000_000_000))
+            .unwrap();
+        exchange
+            .deposit(bob, &usdc, AssetAmount::new(12_080_000_000))
+            .unwrap();
+
+        let alice_price = Price::new(3_000_000_000).unwrap();
+        let alice_quantity = Quantity::new(1_000_000_000_000_000_000);
+        let _alice_result = exchange
+            .place_limit_order(alice, &pair, Side::Sell, alice_price, alice_quantity)
+            .unwrap();
+
+        let carol_price = Price::new(3_010_000_000).unwrap();
+        let carol_quantity = Quantity::new(2_000_000_000_000_000_000);
+
+        let _carol_result = exchange
+            .place_limit_order(carol, &pair, Side::Sell, carol_price, carol_quantity)
+            .unwrap();
+
+        let bob_quantity = Quantity::new(4_000_000_000_000_000_000);
+
+        let result = exchange
+            .place_market_order(
+                bob,
+                &pair,
+                MarketOrderRequest::Buy {
+                    quantity: bob_quantity,
+                    max_quote_amount: AssetAmount::new(12_080_000_000),
+                },
+            )
+            .unwrap();
+
+        let trades = result.trades();
+        assert_eq!(trades.len(), 2);
+        assert_eq!(
+            result.unfilled_quantity(),
+            Quantity::new(1_000_000_000_000_000_000)
+        );
+
+        assert_eq!(trades[0].maker_user_id(), alice);
+        assert_eq!(trades[0].taker_user_id(), bob);
+        assert_eq!(trades[0].price(), alice_price);
+        assert_eq!(trades[0].quantity(), alice_quantity);
+
+        assert_eq!(trades[1].maker_user_id(), carol);
+        assert_eq!(trades[1].taker_user_id(), bob);
+        assert_eq!(trades[1].price(), carol_price);
+        assert_eq!(trades[1].quantity(), carol_quantity);
+
+        let bob_usdc = exchange.ledger().balance(bob, &usdc);
+        let bob_eth = exchange.ledger().balance(bob, &eth);
+        assert_eq!(bob_usdc.locked(), AssetAmount::new(0));
+        assert_eq!(bob_usdc.available(), AssetAmount::new(3_060_000_000));
+        assert_eq!(
+            bob_eth.available(),
+            AssetAmount::new(3_000_000_000_000_000_000)
+        );
+
+        let alice_usdc = exchange.ledger().balance(alice, &usdc);
+        assert_eq!(alice_usdc.available(), AssetAmount::new(3_000_000_000));
+
+        let carol_usdc = exchange.ledger().balance(carol, &usdc);
+        assert_eq!(carol_usdc.available(), AssetAmount::new(6_020_000_000));
+
+        let order_book = exchange.market(&pair).unwrap().order_book();
+
+        assert_eq!(order_book.best_bid(), None);
+        assert_eq!(order_book.best_ask(), None);
+    }
+
+    #[test]
+    fn market_sell_unlocks_unfilled_base_and_does_not_rest() {
+        let mut exchange = Exchange::new();
+
+        let eth = AssetSymbol::new("ETH").unwrap();
+        let usdc = AssetSymbol::new("USDC").unwrap();
+
+        exchange
+            .register_asset(Asset::new(eth.clone(), 18).unwrap())
+            .unwrap();
+        exchange
+            .register_asset(Asset::new(usdc.clone(), 6).unwrap())
+            .unwrap();
+
+        let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+
+        exchange
+            .create_market(
+                pair.clone(),
+                Price::new(10_000).unwrap(),
+                Quantity::new(100_000_000_000_000),
+            )
+            .unwrap();
+
+        let alice = UserId::new(1);
+        let bob = UserId::new(2);
+        exchange
+            .deposit(alice, &usdc, AssetAmount::new(9_000_000_000))
+            .unwrap();
+        exchange
+            .deposit(bob, &eth, AssetAmount::new(5_000_000_000_000_000_000))
+            .unwrap();
+
+        let alice_price = Price::new(3_000_000_000).unwrap();
+        let alice_quantity = Quantity::new(3_000_000_000_000_000_000);
+        let _alice_result = exchange
+            .place_limit_order(alice, &pair, Side::Buy, alice_price, alice_quantity)
+            .unwrap();
+
+        let bob_quantity = Quantity::new(5_000_000_000_000_000_000);
+
+        let result = exchange
+            .place_market_order(
+                bob,
+                &pair,
+                MarketOrderRequest::Sell {
+                    quantity: bob_quantity,
+                },
+            )
+            .unwrap();
+
+        let trades = result.trades();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(
+            result.unfilled_quantity(),
+            Quantity::new(2_000_000_000_000_000_000)
+        );
+
+        assert_eq!(trades[0].maker_user_id(), alice);
+        assert_eq!(trades[0].taker_user_id(), bob);
+        assert_eq!(trades[0].price(), alice_price);
+        assert_eq!(trades[0].quantity(), alice_quantity);
+
+        let bob_usdc = exchange.ledger().balance(bob, &usdc);
+        let bob_eth = exchange.ledger().balance(bob, &eth);
+        assert_eq!(bob_usdc.available(), AssetAmount::new(9_000_000_000));
+        assert_eq!(
+            bob_eth.available(),
+            AssetAmount::new(2_000_000_000_000_000_000)
+        );
+        assert_eq!(bob_eth.locked(), AssetAmount::new(0));
+
+        let alice_usdc = exchange.ledger().balance(alice, &usdc);
+        let alice_eth = exchange.ledger().balance(alice, &eth);
+        assert_eq!(alice_usdc.locked(), AssetAmount::new(0));
+        assert_eq!(
+            alice_eth.available(),
+            AssetAmount::new(3_000_000_000_000_000_000)
+        );
+
+        let order_book = exchange.market(&pair).unwrap().order_book();
+
+        assert_eq!(order_book.best_bid(), None);
+        assert_eq!(order_book.best_ask(), None);
+    }
+
+    #[test]
+    fn market_buy_over_budget_rejects_without_changing_exchange_state() {
+        let mut exchange = Exchange::new();
+
+        let eth = AssetSymbol::new("ETH").unwrap();
+        let usdc = AssetSymbol::new("USDC").unwrap();
+
+        exchange
+            .register_asset(Asset::new(eth.clone(), 18).unwrap())
+            .unwrap();
+        exchange
+            .register_asset(Asset::new(usdc.clone(), 6).unwrap())
+            .unwrap();
+
+        let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+
+        exchange
+            .create_market(
+                pair.clone(),
+                Price::new(10_000).unwrap(),
+                Quantity::new(100_000_000_000_000),
+            )
+            .unwrap();
+
+        let alice = UserId::new(1);
+        let bob = UserId::new(2);
+        exchange
+            .deposit(alice, &eth, AssetAmount::new(1_000_000_000_000_000_000))
+            .unwrap();
+        exchange
+            .deposit(bob, &usdc, AssetAmount::new(2_999_000_000))
+            .unwrap();
+
+        let alice_price = Price::new(3_000_000_000).unwrap();
+        let alice_quantity = Quantity::new(1_000_000_000_000_000_000);
+        let _alice_result = exchange
+            .place_limit_order(alice, &pair, Side::Sell, alice_price, alice_quantity)
+            .unwrap();
+
+        let bob_quantity = Quantity::new(1_000_000_000_000_000_000);
+
+        assert!(matches!(
+            exchange.place_market_order(
+                bob,
+                &pair,
+                MarketOrderRequest::Buy {
+                    quantity: bob_quantity,
+                    max_quote_amount: AssetAmount::new(2_999_000_000),
+                },
+            ),
+            Err(ExchangeError::MarketBuyBudgetExceeded),
+        ));
+
+        let bob_usdc = exchange.ledger().balance(bob, &usdc);
+        let bob_eth = exchange.ledger().balance(bob, &eth);
+        assert_eq!(bob_usdc.available(), AssetAmount::new(2_999_000_000));
+        assert_eq!(bob_usdc.locked(), AssetAmount::new(0));
+        assert_eq!(bob_eth.available(), AssetAmount::new(0));
+        assert_eq!(bob_eth.locked(), AssetAmount::new(0));
+
+        let alice_usdc = exchange.ledger().balance(alice, &usdc);
+        let alice_eth = exchange.ledger().balance(alice, &eth);
+        assert_eq!(alice_usdc.locked(), AssetAmount::new(0));
+        assert_eq!(alice_eth.available(), AssetAmount::new(0));
+        assert_eq!(
+            alice_eth.locked(),
+            AssetAmount::new(1_000_000_000_000_000_000)
+        );
+
+        let order_book = exchange.market(&pair).unwrap().order_book();
+
+        assert_eq!(order_book.best_bid(), None);
+        assert_eq!(
+            order_book.best_ask(),
+            Some(Price::new(3_000_000_000).unwrap())
+        );
     }
 }

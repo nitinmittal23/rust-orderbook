@@ -95,17 +95,9 @@ impl Market {
         Ok(AssetAmount::new(product / scale))
     }
 
-    pub(crate) fn validate_limit_order(
-        &self,
-        price: Price,
-        quantity: Quantity,
-    ) -> Result<(), MarketOrderError> {
+    fn validate_quantity_and_sequence(&self, quantity: Quantity) -> Result<(), MarketOrderError> {
         if quantity.is_zero() {
             return Err(MarketOrderError::InvalidOrder(OrderError::ZeroQuantity));
-        }
-
-        if price.value() % self.price_tick.value() != 0 {
-            return Err(MarketOrderError::PriceNotAligned);
         }
 
         if quantity.value() % self.quantity_step.value() != 0 {
@@ -115,8 +107,25 @@ impl Market {
         self.next_sequence_number
             .checked_add(1)
             .ok_or(MarketOrderError::SequenceExhausted)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_limit_order(
+        &self,
+        price: Price,
+        quantity: Quantity,
+    ) -> Result<(), MarketOrderError> {
+        self.validate_quantity_and_sequence(quantity)?;
+
+        if price.value() % self.price_tick.value() != 0 {
+            return Err(MarketOrderError::PriceNotAligned);
+        }
 
         Ok(())
+    }
+
+    pub(crate) fn validate_market_order(&self, quantity: Quantity) -> Result<(), MarketOrderError> {
+        self.validate_quantity_and_sequence(quantity)
     }
 
     pub(crate) fn place_limit_order(
@@ -140,6 +149,35 @@ impl Market {
             user_id,
             side,
             OrderKind::Limit { price },
+            quantity,
+            sequence,
+        )
+        .map_err(MarketOrderError::InvalidOrder)?;
+
+        self.next_sequence_number = next_sequence_number;
+        Ok(self.order_book.place(order))
+    }
+
+    pub(crate) fn place_market_order(
+        &mut self,
+        order_id: OrderId,
+        user_id: UserId,
+        side: Side,
+        quantity: Quantity,
+    ) -> Result<PlacementResult, MarketOrderError> {
+        self.validate_market_order(quantity)?;
+
+        let next_sequence_number = self
+            .next_sequence_number
+            .checked_add(1)
+            .ok_or(MarketOrderError::SequenceExhausted)?;
+        let sequence = SequenceNumber::new(self.next_sequence_number);
+
+        let order = Order::new(
+            order_id,
+            user_id,
+            side,
+            OrderKind::Market,
             quantity,
             sequence,
         )
@@ -405,5 +443,58 @@ mod tests {
             Market::new(eth_usdc, &eth, price_tick, quantity_step),
             Err(MarketCreationError::IncrementCalculationOverflow)
         ));
+    }
+
+    #[test]
+    fn market_order_matches_and_does_not_rest_remainder() {
+        let eth_usdc = TradingPair::new(
+            AssetSymbol::new("ETH").unwrap(),
+            AssetSymbol::new("USDC").unwrap(),
+        )
+        .unwrap();
+
+        let eth = Asset::new(AssetSymbol::new("ETH").unwrap(), 18).unwrap();
+
+        let price_tick = Price::new(10_000).unwrap();
+        let quantity_step = Quantity::new(100_000_000_000_000);
+        let mut market = Market::new(eth_usdc, &eth, price_tick, quantity_step).unwrap();
+        let resting_price = Price::new(3_000_000_000).unwrap();
+
+        let alice_result = market
+            .place_limit_order(
+                OrderId::new(1),
+                UserId::new(1),
+                Side::Sell,
+                resting_price,
+                Quantity::new(1_000_000_000_000_000_000),
+            )
+            .unwrap();
+        assert!(alice_result.trades().is_empty());
+        assert_eq!(market.order_book().best_ask(), Some(resting_price));
+
+        let result = market
+            .place_market_order(
+                OrderId::new(2),
+                UserId::new(2),
+                Side::Buy,
+                Quantity::new(2_000_000_000_000_000_000),
+            )
+            .unwrap();
+        assert_eq!(result.trades().len(), 1);
+
+        let trade = &result.trades()[0];
+        assert_eq!(trade.maker_user_id(), UserId::new(1));
+        assert_eq!(trade.taker_user_id(), UserId::new(2));
+        assert_eq!(trade.taker_side(), Side::Buy);
+        assert_eq!(trade.price(), resting_price);
+        assert_eq!(trade.quantity(), Quantity::new(1_000_000_000_000_000_000));
+        assert_eq!(
+            result.unfilled_quantity(),
+            Quantity::new(1_000_000_000_000_000_000)
+        );
+
+        let order_book = market.order_book();
+        assert_eq!(order_book.best_ask(), None);
+        assert_eq!(order_book.best_bid(), None);
     }
 }

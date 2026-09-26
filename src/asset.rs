@@ -7,6 +7,16 @@ pub enum AssetSymbolError {
     InvalidCharacter,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetError {
+    UnsupportedDecimals,
+}
+
+pub struct Asset {
+    symbol: AssetSymbol,
+    decimals: u8,
+}
+
 impl AssetSymbol {
     pub fn new(input: &str) -> Result<Self, AssetSymbolError> {
         let normalized = input.trim().to_ascii_uppercase();
@@ -26,6 +36,28 @@ impl AssetSymbol {
 
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+}
+
+impl Asset {
+    pub fn new(symbol: AssetSymbol, decimals: u8) -> Result<Self, AssetError> {
+        if decimals > 18 {
+            return Err(AssetError::UnsupportedDecimals);
+        }
+
+        Ok(Self { symbol, decimals })
+    }
+
+    pub fn symbol(&self) -> &AssetSymbol {
+        &self.symbol
+    }
+
+    pub fn decimals(&self) -> u8 {
+        self.decimals
+    }
+
+    pub fn scale(&self) -> u128 {
+        10_u128.pow(self.decimals as u32)
     }
 }
 
@@ -73,5 +105,31 @@ mod tests {
     fn symbol_may_start_with_a_digit() {
         let symbol = AssetSymbol::new("1inch").unwrap();
         assert_eq!(symbol.as_str(), "1INCH");
+    }
+
+    #[test]
+    fn asset_with_eighteen_decimals_is_accepted() {
+        let symbol = AssetSymbol::new("ETH").unwrap();
+        let asset = Asset::new(symbol, 18).unwrap();
+
+        assert_eq!(asset.symbol().as_str(), "ETH");
+        assert_eq!(asset.decimals(), 18);
+        assert_eq!(asset.scale(), 10_u128.pow(18));
+    }
+
+    #[test]
+    fn asset_scale_is_calculated_from_decimals() {
+        let symbol = AssetSymbol::new("USDC").unwrap();
+        let asset = Asset::new(symbol, 6).unwrap();
+        assert_eq!(asset.scale(), 1_000_000);
+    }
+
+    #[test]
+    fn asset_with_more_than_eighteen_decimals_is_rejected() {
+        let symbol = AssetSymbol::new("TEST").unwrap();
+        assert!(matches!(
+            Asset::new(symbol, 19),
+            Err(AssetError::UnsupportedDecimals)
+        ));
     }
 }

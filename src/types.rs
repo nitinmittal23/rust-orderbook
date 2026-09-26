@@ -1,20 +1,24 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Price(u64);
+pub struct Price(u128);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Quantity(u64);
+pub struct Quantity(u128);
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PriceError {
     Zero,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OrderId(u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UserId(u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SequenceNumber(u64);
 
 impl Price {
-    pub fn new(price: u64) -> Result<Self, PriceError> {
+    pub fn new(price: u128) -> Result<Self, PriceError> {
         if price == 0 {
             Err(PriceError::Zero)
         } else {
@@ -22,17 +26,17 @@ impl Price {
         }
     }
 
-    pub fn value(&self) -> u64 {
+    pub fn value(&self) -> u128 {
         self.0
     }
 }
 
 impl Quantity {
-    pub fn new(quantity: u64) -> Self {
+    pub fn new(quantity: u128) -> Self {
         Quantity(quantity)
     }
 
-    pub fn value(&self) -> u64 {
+    pub fn value(&self) -> u128 {
         self.0
     }
 

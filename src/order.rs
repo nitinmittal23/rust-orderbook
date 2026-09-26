@@ -12,7 +12,7 @@ pub enum OrderKind {
     Market,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Order {
     id: OrderId,
     user_id: UserId,

@@ -4,7 +4,7 @@ use crate::types::{OrderId, Price, Quantity};
 use std::cmp::min;
 use std::collections::{BTreeMap, VecDeque};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PriceLevel {
     price: Price,
     orders: VecDeque<Order>,
@@ -21,7 +21,7 @@ pub enum CancelError {
     OrderNotFound,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderBook {
     bids: BTreeMap<Price, PriceLevel>,
     asks: BTreeMap<Price, PriceLevel>,

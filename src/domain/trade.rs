@@ -1,5 +1,5 @@
-use crate::order::Side;
-use crate::types::{OrderId, Price, Quantity, UserId};
+use crate::domain::order::Side;
+use crate::domain::primitives::{OrderId, Price, Quantity, UserId};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Trade {

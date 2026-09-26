@@ -1,9 +1,6 @@
-use crate::asset::AssetSymbol;
-use crate::types::UserId;
+use crate::domain::asset::AssetSymbol;
+use crate::domain::primitives::{AssetAmount, UserId};
 use std::collections::HashMap;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AssetAmount(u128);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Balance {
@@ -21,24 +18,6 @@ pub enum LedgerError {
 #[derive(Debug, Default, Clone)]
 pub struct Ledger {
     balances: HashMap<UserId, HashMap<AssetSymbol, Balance>>,
-}
-
-impl AssetAmount {
-    pub fn new(amount: u128) -> Self {
-        Self(amount)
-    }
-
-    pub fn value(self) -> u128 {
-        self.0
-    }
-
-    pub fn checked_add(self, other: Self) -> Option<Self> {
-        self.0.checked_add(other.0).map(Self)
-    }
-
-    pub fn checked_sub(self, other: Self) -> Option<Self> {
-        self.0.checked_sub(other.0).map(Self)
-    }
 }
 
 impl Balance {

@@ -17,6 +17,9 @@ pub struct UserId(u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SequenceNumber(u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AssetAmount(u128);
+
 impl Price {
     pub fn new(price: u128) -> Result<Self, PriceError> {
         if price == 0 {
@@ -76,6 +79,24 @@ impl SequenceNumber {
 
     pub fn value(self) -> u64 {
         self.0
+    }
+}
+
+impl AssetAmount {
+    pub fn new(amount: u128) -> Self {
+        Self(amount)
+    }
+
+    pub fn value(self) -> u128 {
+        self.0
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        self.0.checked_add(other.0).map(Self)
+    }
+
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        self.0.checked_sub(other.0).map(Self)
     }
 }
 

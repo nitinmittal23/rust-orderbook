@@ -1,6 +1,6 @@
-use crate::order::{Order, OrderKind, Side};
-use crate::trade::Trade;
-use crate::types::{OrderId, Price, Quantity};
+use crate::domain::order::{Order, OrderKind, Side};
+use crate::domain::primitives::{OrderId, Price, Quantity};
+use crate::domain::trade::Trade;
 use std::cmp::min;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -272,8 +272,8 @@ impl OrderBook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::order::OrderKind;
-    use crate::types::{OrderId, Quantity, SequenceNumber, UserId};
+    use crate::domain::order::OrderKind;
+    use crate::domain::primitives::{OrderId, Quantity, SequenceNumber, UserId};
 
     #[test]
     fn new_price_level_has_its_price_and_no_orders() {

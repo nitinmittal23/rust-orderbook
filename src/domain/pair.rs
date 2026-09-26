@@ -1,4 +1,4 @@
-use crate::asset::AssetSymbol;
+use crate::domain::asset::AssetSymbol;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TradingPair {

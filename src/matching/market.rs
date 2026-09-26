@@ -1,9 +1,8 @@
-use crate::asset::Asset;
-use crate::book::{CancelError, OrderBook, PlacementResult};
-use crate::ledger::AssetAmount;
-use crate::order::{Order, OrderError, OrderKind, Side};
-use crate::pair::TradingPair;
-use crate::types::{OrderId, Price, Quantity, SequenceNumber, UserId};
+use crate::domain::asset::Asset;
+use crate::domain::order::{Order, OrderError, OrderKind, Side};
+use crate::domain::pair::TradingPair;
+use crate::domain::primitives::{AssetAmount, OrderId, Price, Quantity, SequenceNumber, UserId};
+use crate::matching::book::{CancelError, OrderBook, PlacementResult};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum QuoteAmountError {
@@ -195,9 +194,9 @@ impl Market {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::AssetSymbol;
-    use crate::order::Side;
-    use crate::types::{SequenceNumber, UserId};
+    use crate::domain::asset::AssetSymbol;
+    use crate::domain::order::Side;
+    use crate::domain::primitives::{SequenceNumber, UserId};
 
     #[test]
     fn quote_amount_is_calculated_in_quote_atomic_units() {

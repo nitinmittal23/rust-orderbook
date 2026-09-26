@@ -1,4 +1,4 @@
-use crate::types::{OrderId, Price, Quantity, SequenceNumber, UserId};
+use crate::domain::primitives::{OrderId, Price, Quantity, SequenceNumber, UserId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {

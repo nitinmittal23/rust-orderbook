@@ -254,7 +254,7 @@ pub async fn cancel_limit_order(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((base, quote, order_id)): Path<(String, String, String)>,
-) -> Result<Json<CancelLimitResponse>, ApiError> {
+) -> Result<Json<CancelOrderResponse>, ApiError> {
     let user_id = user_id_from_header(&headers)?;
 
     let base_symbol = AssetSymbol::new(&base)

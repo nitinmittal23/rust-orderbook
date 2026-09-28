@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/orders/limit", post(handlers::place_limit_order))
         .route("/orders/market", post(handlers::place_market_order))
+        .route("/orders/stop-limit", post(handlers::place_stop_limit_order))
         .route("/balances/{asset}", get(handlers::get_balance))
         .route(
             "/markets/{base}/{quote}/orders/{order_id}",

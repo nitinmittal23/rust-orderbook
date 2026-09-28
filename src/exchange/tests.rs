@@ -1836,11 +1836,7 @@ fn cancelling_pending_buy_stop_unlocks_full_quote_amount() {
     let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
 
     exchange
-        .create_market(
-            pair.clone(),
-            Price::new(1).unwrap(),
-            Quantity::new(1),
-        )
+        .create_market(pair.clone(), Price::new(1).unwrap(), Quantity::new(1))
         .unwrap();
 
     exchange
@@ -1852,36 +1848,18 @@ fn cancelling_pending_buy_stop_unlocks_full_quote_amount() {
     let quantity = Quantity::new(2);
 
     let order_id = exchange
-        .place_stop_limit_order(
-            alice,
-            &pair,
-            Side::Buy,
-            stop_price,
-            limit_price,
-            quantity,
-        )
+        .place_stop_limit_order(alice, &pair, Side::Buy, stop_price, limit_price, quantity)
         .unwrap();
 
     assert_eq!(order_id, OrderId::new(1));
 
     let alice_usdc_before = exchange.ledger().balance(alice, &usdc);
-    assert_eq!(
-        alice_usdc_before.available(),
-        AssetAmount::new(0)
-    );
-    assert_eq!(
-        alice_usdc_before.locked(),
-        AssetAmount::new(230)
-    );
+    assert_eq!(alice_usdc_before.available(), AssetAmount::new(0));
+    assert_eq!(alice_usdc_before.locked(), AssetAmount::new(230));
 
-    let cancelled = exchange
-        .cancel_order(alice, &pair, order_id)
-        .unwrap();
+    let cancelled = exchange.cancel_order(alice, &pair, order_id).unwrap();
 
-    assert!(matches!(
-        &cancelled,
-        CancelledOrder::PendingStop(_)
-    ));
+    assert!(matches!(&cancelled, CancelledOrder::PendingStop(_)));
     assert_eq!(cancelled.id(), order_id);
     assert_eq!(cancelled.user_id(), alice);
     assert_eq!(cancelled.side(), Side::Buy);
@@ -1892,14 +1870,8 @@ fn cancelling_pending_buy_stop_unlocks_full_quote_amount() {
     assert_eq!(cancelled.sequence(), None);
 
     let alice_usdc_after = exchange.ledger().balance(alice, &usdc);
-    assert_eq!(
-        alice_usdc_after.available(),
-        AssetAmount::new(230)
-    );
-    assert_eq!(
-        alice_usdc_after.locked(),
-        AssetAmount::new(0)
-    );
+    assert_eq!(alice_usdc_after.available(), AssetAmount::new(230));
+    assert_eq!(alice_usdc_after.locked(), AssetAmount::new(0));
 
     let alice_eth = exchange.ledger().balance(alice, &eth);
     assert_eq!(alice_eth.available(), AssetAmount::new(0));

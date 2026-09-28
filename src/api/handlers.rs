@@ -18,7 +18,8 @@ use super::{
     decimal::{format_decimal, parse_decimal},
     dto::{
         BalanceResponse, BookTickerResponse, CancelLimitOrderResponse, OrderPlacementResponse,
-        PlaceLimitOrderRequest, PlaceMarketOrderRequest, TradeResponse,
+        PlaceLimitOrderRequest, PlaceMarketOrderRequest, PlaceStopLimitOrderRequest,
+        PlaceStopLimitOrderResponse, TradeResponse,
     },
     error::ApiError,
     state::AppState,
@@ -443,6 +444,96 @@ pub async fn place_market_order(
             result.unfilled_quantity().value(),
             base_decimals,
         )?,
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+pub async fn place_stop_limit_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PlaceStopLimitOrderRequest>,
+) -> Result<(StatusCode, Json<PlaceStopLimitOrderResponse>), ApiError> {
+    let user_id = user_id_from_header(&headers)?;
+
+    let base_symbol = AssetSymbol::new(&request.base)
+        .map_err(|_| ApiError::bad_request("INVALID_BASE_SYMBOL", "invalid base symbol"))?;
+
+    let quote_symbol = AssetSymbol::new(&request.quote)
+        .map_err(|_| ApiError::bad_request("INVALID_QUOTE_SYMBOL", "invalid quote symbol"))?;
+
+    let pair = TradingPair::new(base_symbol, quote_symbol)
+        .map_err(|_| ApiError::bad_request("INVALID_TRADING_PAIR", "invalid trading pair"))?;
+
+    let side = parse_side(&request.side)?;
+
+    let mut exchange = state.exchange.lock().map_err(|_| {
+        ApiError::internal(
+            "EXCHANGE_STATE_UNAVAILABLE",
+            "exchange state is unavailable",
+        )
+    })?;
+
+    if exchange.market(&pair).is_none() {
+        return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
+    }
+
+    let base_decimals = exchange
+        .asset(pair.base())
+        .ok_or_else(|| {
+            ApiError::internal(
+                "ASSET_CONFIGURATION_ERROR",
+                "base asset configuration is unavailable",
+            )
+        })?
+        .decimals();
+
+    let quote_decimals = exchange
+        .asset(pair.quote())
+        .ok_or_else(|| {
+            ApiError::internal(
+                "ASSET_CONFIGURATION_ERROR",
+                "quote asset configuration is unavailable",
+            )
+        })?
+        .decimals();
+
+    let quantity_atomic = parse_decimal(&request.quantity, base_decimals).map_err(|_| {
+        ApiError::bad_request("INVALID_QUANTITY", "quantity has an invalid decimal")
+    })?;
+
+    let stop_price_atomic = parse_decimal(&request.stop_price, quote_decimals).map_err(|_| {
+        ApiError::bad_request(
+            "INVALID_STOP_PRICE",
+            "stop price has an invalid decimal format",
+        )
+    })?;
+
+    let limit_price_atomic = parse_decimal(&request.limit_price, quote_decimals).map_err(|_| {
+        ApiError::bad_request(
+            "INVALID_LIMIT_PRICE",
+            "limit price has an invalid decimal format",
+        )
+    })?;
+
+    let quantity = Quantity::new(quantity_atomic);
+    let stop_price = Price::new(stop_price_atomic).map_err(|_| {
+        ApiError::bad_request("INVALID_STOP_PRICE", "stop price must be greater than zero")
+    })?;
+    let limit_price = Price::new(limit_price_atomic).map_err(|_| {
+        ApiError::bad_request(
+            "INVALID_LIMIT_PRICE",
+            "limit price must be greater than zero",
+        )
+    })?;
+
+    let result =
+        exchange.place_stop_limit_order(user_id, &pair, side, stop_price, limit_price, quantity)?;
+
+    drop(exchange);
+
+    let response = PlaceStopLimitOrderResponse {
+        order_id: result.value().to_string(),
     };
 
     Ok((StatusCode::CREATED, Json(response)))

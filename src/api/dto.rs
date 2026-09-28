@@ -64,3 +64,18 @@ pub enum PlaceMarketOrderRequest {
         quantity: String,
     },
 }
+
+#[derive(Deserialize)]
+pub struct PlaceStopLimitOrderRequest {
+    pub base: String,
+    pub quote: String,
+    pub side: String,
+    pub quantity: String,
+    pub stop_price: String,
+    pub limit_price: String,
+}
+
+#[derive(Serialize)]
+pub struct PlaceStopLimitOrderResponse {
+    pub order_id: String,
+}

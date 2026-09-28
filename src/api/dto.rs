@@ -41,7 +41,7 @@ pub struct BalanceResponse {
 }
 
 #[derive(Serialize)]
-pub struct CancelLimitOrderResponse {
+pub struct CancelOrderResponse {
     pub order_id: String,
     pub remaining_quantity: String,
     pub original_quantity: String,

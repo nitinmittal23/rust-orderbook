@@ -17,7 +17,7 @@ use crate::{
 use super::{
     decimal::{format_decimal, parse_decimal},
     dto::{
-        BalanceResponse, BookTickerResponse, CancelLimitOrderResponse, OrderPlacementResponse,
+        BalanceResponse, BookTickerResponse, CancelOrderResponse, OrderPlacementResponse,
         PlaceLimitOrderRequest, PlaceMarketOrderRequest, PlaceStopLimitOrderRequest,
         PlaceStopLimitOrderResponse, TradeResponse,
     },
@@ -254,7 +254,7 @@ pub async fn cancel_limit_order(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((base, quote, order_id)): Path<(String, String, String)>,
-) -> Result<Json<CancelLimitOrderResponse>, ApiError> {
+) -> Result<Json<CancelLimitResponse>, ApiError> {
     let user_id = user_id_from_header(&headers)?;
 
     let base_symbol = AssetSymbol::new(&base)
@@ -312,7 +312,7 @@ pub async fn cancel_limit_order(
     })?;
     drop(exchange);
 
-    let response = CancelLimitOrderResponse {
+    let response = CancelOrderResponse {
         order_id: result.id().value().to_string(),
         price: format_response_decimal(price.value(), quote_decimals)?,
         original_quantity: format_response_decimal(

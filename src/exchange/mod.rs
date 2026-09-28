@@ -1,11 +1,16 @@
 use crate::accounting::ledger::{Ledger, LedgerError};
-use crate::domain::asset::{Asset, AssetSymbol};
-use crate::domain::order::{Order, Side};
-use crate::domain::pair::TradingPair;
-use crate::domain::primitives::{AssetAmount, OrderId, Price, Quantity, UserId};
-use crate::domain::trade::Trade;
-use crate::matching::book::{CancelError, PlacementResult};
-use crate::matching::market::{Market, MarketCreationError, MarketOrderError, QuoteAmountError};
+use crate::domain::{
+    asset::{Asset, AssetSymbol},
+    order::Side,
+    pair::TradingPair,
+    primitives::{AssetAmount, OrderId, Price, Quantity, UserId},
+    trade::Trade,
+};
+use crate::matching::{
+    book::{CancelError, PlacementResult},
+    market::{CancelledOrder, Market, MarketCreationError, MarketOrderError, QuoteAmountError},
+};
+
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +214,6 @@ impl Exchange {
         staged_ledger: &mut Ledger,
         market: &Market,
         pair: &TradingPair,
-        incoming_limit_price: Option<Price>,
         trade: &Trade,
     ) -> Result<(), ExchangeError> {
         let (buyer_id, seller_id) = match trade.taker_side() {
@@ -223,7 +227,7 @@ impl Exchange {
             .calculate_quote_amount(trade.price(), trade.quantity())
             .map_err(ExchangeError::QuoteAmount)?;
 
-        let buyer_quote_refund = match (trade.taker_side(), incoming_limit_price) {
+        let buyer_quote_refund = match (trade.taker_side(), trade.taker_limit_price()) {
             (Side::Buy, Some(limit_price)) => {
                 let reserved_quote = market
                     .calculate_quote_amount(limit_price, trade.quantity())
@@ -277,19 +281,8 @@ impl Exchange {
             .place_limit_order(order_id, user_id, side, price, quantity)
             .map_err(ExchangeError::MarketOrder)?;
 
-        let incoming_buy_limit_price = match side {
-            Side::Buy => Some(price),
-            Side::Sell => None,
-        };
-
         for trade in outcome.trades() {
-            Self::settle_generated_trade(
-                &mut staged_ledger,
-                &staged_market,
-                pair,
-                incoming_buy_limit_price,
-                trade,
-            )?;
+            Self::settle_generated_trade(&mut staged_ledger, &staged_market, pair, trade)?;
         }
 
         self.ledger = staged_ledger;
@@ -329,6 +322,9 @@ impl Exchange {
         let mut total_quote_amount = AssetAmount::new(0);
 
         for trade in outcome.trades() {
+            if trade.taker_order_id() != order_id {
+                continue;
+            }
             let trade_quote_amount = staged_market
                 .calculate_quote_amount(trade.price(), trade.quantity())
                 .map_err(ExchangeError::QuoteAmount)?;
@@ -347,7 +343,7 @@ impl Exchange {
         }
 
         for trade in outcome.trades() {
-            Self::settle_generated_trade(&mut staged_ledger, &staged_market, pair, None, trade)?;
+            Self::settle_generated_trade(&mut staged_ledger, &staged_market, pair, trade)?;
         }
 
         match request {
@@ -377,12 +373,51 @@ impl Exchange {
         Ok(OrderPlacementResult { order_id, outcome })
     }
 
+    pub fn place_stop_limit_order(
+        &mut self,
+        user_id: UserId,
+        pair: &TradingPair,
+        side: Side,
+        stop_price: Price,
+        limit_price: Price,
+        quantity: Quantity,
+    ) -> Result<OrderId, ExchangeError> {
+        let following_order_id = self
+            .next_order_id
+            .checked_add(1)
+            .ok_or(ExchangeError::OrderIdExhausted)?;
+        let order_id = OrderId::new(self.next_order_id);
+
+        let mut staged_ledger = self.ledger.clone();
+        let mut staged_market = self
+            .markets
+            .get(pair)
+            .ok_or(ExchangeError::UnknownMarket)?
+            .clone();
+
+        let (lock_asset, lock_amount) = self.required_lock(pair, side, limit_price, quantity)?;
+
+        staged_market
+            .place_stop_limit_order(order_id, user_id, side, stop_price, limit_price, quantity)
+            .map_err(ExchangeError::MarketOrder)?;
+
+        staged_ledger
+            .lock(user_id, &lock_asset, lock_amount)
+            .map_err(ExchangeError::Ledger)?;
+
+        self.ledger = staged_ledger;
+        self.markets.insert(pair.clone(), staged_market);
+        self.next_order_id = following_order_id;
+
+        Ok(order_id)
+    }
+
     pub fn cancel_order(
         &mut self,
         user_id: UserId,
         pair: &TradingPair,
         order_id: OrderId,
-    ) -> Result<Order, ExchangeError> {
+    ) -> Result<CancelledOrder, ExchangeError> {
         let mut staged_ledger = self.ledger.clone();
         let mut staged_market = self
             .markets

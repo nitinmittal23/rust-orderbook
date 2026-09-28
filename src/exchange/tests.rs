@@ -1293,3 +1293,620 @@ fn market_buy_over_budget_rejects_without_changing_exchange_state() {
         Some(Price::new(3_000_000_000).unwrap())
     );
 }
+
+#[test]
+fn stop_limit_sell_locks_base_without_entering_active_book() {
+    let mut exchange = Exchange::new();
+
+    let alice = UserId::new(1);
+    let eth = AssetSymbol::new("ETH").unwrap();
+    let usdc = AssetSymbol::new("USDC").unwrap();
+
+    exchange
+        .register_asset(Asset::new(eth.clone(), 0).unwrap())
+        .unwrap();
+    exchange
+        .register_asset(Asset::new(usdc.clone(), 0).unwrap())
+        .unwrap();
+
+    let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+
+    exchange
+        .create_market(pair.clone(), Price::new(5).unwrap(), Quantity::new(20))
+        .unwrap();
+
+    exchange.deposit(alice, &eth, AssetAmount::new(40)).unwrap();
+
+    let stop_price = Price::new(100).unwrap();
+    let limit_price = Price::new(95).unwrap();
+    let quantity = Quantity::new(40);
+
+    let order_id = exchange
+        .place_stop_limit_order(alice, &pair, Side::Sell, stop_price, limit_price, quantity)
+        .unwrap();
+
+    assert_eq!(order_id, OrderId::new(1));
+
+    let alice_eth = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth.locked(), AssetAmount::new(40));
+    assert_eq!(alice_eth.available(), AssetAmount::new(0));
+
+    let order_book = exchange.market(&pair).unwrap().order_book();
+
+    assert_eq!(order_book.best_bid(), None);
+    assert_eq!(order_book.best_ask(), None);
+}
+
+#[test]
+fn triggered_stop_limit_settles_prelocked_funds_and_rests_remainder() {
+    let mut exchange = Exchange::new();
+
+    let eth = AssetSymbol::new("ETH").unwrap();
+    let usdc = AssetSymbol::new("USDC").unwrap();
+
+    exchange
+        .register_asset(Asset::new(eth.clone(), 0).unwrap())
+        .unwrap();
+    exchange
+        .register_asset(Asset::new(usdc.clone(), 0).unwrap())
+        .unwrap();
+
+    let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+
+    exchange
+        .create_market(pair.clone(), Price::new(5).unwrap(), Quantity::new(20))
+        .unwrap();
+
+    let alice = UserId::new(1);
+    let bob = UserId::new(2);
+    let carol = UserId::new(3);
+
+    exchange
+        .deposit(bob, &usdc, AssetAmount::new(4_000))
+        .unwrap();
+    exchange.deposit(alice, &eth, AssetAmount::new(40)).unwrap();
+    exchange.deposit(carol, &eth, AssetAmount::new(20)).unwrap();
+
+    let bob_result = exchange
+        .place_limit_order(
+            bob,
+            &pair,
+            Side::Buy,
+            Price::new(100).unwrap(),
+            Quantity::new(40),
+        )
+        .unwrap();
+    assert_eq!(bob_result.order_id(), OrderId::new(1));
+
+    let stop_price = Price::new(100).unwrap();
+    let limit_price = Price::new(95).unwrap();
+    let quantity = Quantity::new(40);
+
+    let order_id = exchange
+        .place_stop_limit_order(alice, &pair, Side::Sell, stop_price, limit_price, quantity)
+        .unwrap();
+    assert_eq!(order_id, OrderId::new(2));
+
+    let carol_result = exchange
+        .place_limit_order(
+            carol,
+            &pair,
+            Side::Sell,
+            Price::new(100).unwrap(),
+            Quantity::new(20),
+        )
+        .unwrap();
+    assert_eq!(carol_result.order_id(), OrderId::new(3));
+
+    assert_eq!(carol_result.unfilled_quantity(), Quantity::new(0));
+    let trades = carol_result.trades();
+
+    assert_eq!(trades.len(), 2);
+
+    assert_eq!(trades[0].maker_user_id(), bob);
+    assert_eq!(trades[0].taker_user_id(), carol);
+    assert_eq!(trades[0].price(), Price::new(100).unwrap());
+    assert_eq!(trades[0].quantity(), Quantity::new(20));
+    assert_eq!(trades[0].maker_order_id(), OrderId::new(1));
+    assert_eq!(trades[0].taker_order_id(), OrderId::new(3));
+
+    assert_eq!(trades[1].maker_user_id(), bob);
+    assert_eq!(trades[1].taker_user_id(), alice);
+    assert_eq!(trades[1].price(), Price::new(100).unwrap());
+    assert_eq!(trades[1].quantity(), Quantity::new(20));
+    assert_eq!(trades[1].maker_order_id(), OrderId::new(1));
+    assert_eq!(trades[1].taker_order_id(), OrderId::new(2));
+
+    let alice_eth = exchange.ledger().balance(alice, &eth);
+    let alice_usdc = exchange.ledger().balance(alice, &usdc);
+    assert_eq!(alice_eth.locked(), AssetAmount::new(20));
+    assert_eq!(alice_eth.available(), AssetAmount::new(0));
+    assert_eq!(alice_usdc.locked(), AssetAmount::new(0));
+    assert_eq!(alice_usdc.available(), AssetAmount::new(2000));
+
+    let bob_eth = exchange.ledger().balance(bob, &eth);
+    let bob_usdc = exchange.ledger().balance(bob, &usdc);
+    assert_eq!(bob_eth.locked(), AssetAmount::new(0));
+    assert_eq!(bob_eth.available(), AssetAmount::new(40));
+    assert_eq!(bob_usdc.locked(), AssetAmount::new(0));
+    assert_eq!(bob_usdc.available(), AssetAmount::new(0));
+
+    let carol_eth = exchange.ledger().balance(carol, &eth);
+    let carol_usdc = exchange.ledger().balance(carol, &usdc);
+    assert_eq!(carol_eth.locked(), AssetAmount::new(0));
+    assert_eq!(carol_eth.available(), AssetAmount::new(0));
+    assert_eq!(carol_usdc.locked(), AssetAmount::new(0));
+    assert_eq!(carol_usdc.available(), AssetAmount::new(2000));
+
+    let order_book = exchange.market(&pair).unwrap().order_book();
+
+    assert_eq!(order_book.best_bid(), None);
+    assert_eq!(order_book.best_ask(), Some(Price::new(95).unwrap()));
+}
+
+#[test]
+fn cancelling_pending_stop_unlocks_full_base_quantity() {
+    let mut exchange = Exchange::new();
+
+    let eth = AssetSymbol::new("ETH").unwrap();
+    let usdc = AssetSymbol::new("USDC").unwrap();
+    exchange
+        .register_asset(Asset::new(eth.clone(), 0).unwrap())
+        .unwrap();
+    exchange
+        .register_asset(Asset::new(usdc.clone(), 0).unwrap())
+        .unwrap();
+
+    let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+    exchange
+        .create_market(pair.clone(), Price::new(5).unwrap(), Quantity::new(20))
+        .unwrap();
+
+    let alice = UserId::new(1);
+    exchange.deposit(alice, &eth, AssetAmount::new(40)).unwrap();
+
+    let stop_price = Price::new(100).unwrap();
+    let limit_price = Price::new(95).unwrap();
+
+    exchange
+        .place_stop_limit_order(
+            alice,
+            &pair,
+            Side::Sell,
+            stop_price,
+            limit_price,
+            Quantity::new(40),
+        )
+        .unwrap();
+
+    let alice_eth = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth.available(), AssetAmount::new(0));
+    assert_eq!(alice_eth.locked(), AssetAmount::new(40));
+
+    let cancelled = exchange
+        .cancel_order(alice, &pair, OrderId::new(1))
+        .unwrap();
+
+    assert!(matches!(cancelled, CancelledOrder::PendingStop(_)));
+    assert_eq!(cancelled.id(), OrderId::new(1));
+    assert_eq!(cancelled.stop_price(), Some(stop_price));
+    assert_eq!(cancelled.limit_price(), Some(limit_price));
+    assert_eq!(cancelled.remaining_quantity(), Quantity::new(40));
+    assert_eq!(cancelled.sequence(), None);
+
+    let alice_eth_after = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth_after.available(), AssetAmount::new(40));
+    assert_eq!(alice_eth_after.locked(), AssetAmount::new(0));
+
+    assert_eq!(
+        exchange.cancel_order(alice, &pair, OrderId::new(1)),
+        Err(ExchangeError::Cancel(CancelError::OrderNotFound))
+    )
+}
+
+#[test]
+fn another_user_cannot_cancel_pending_stop_or_unlock_funds() {
+    let mut exchange = Exchange::new();
+
+    let eth = AssetSymbol::new("ETH").unwrap();
+    let usdc = AssetSymbol::new("USDC").unwrap();
+    exchange
+        .register_asset(Asset::new(eth.clone(), 0).unwrap())
+        .unwrap();
+    exchange
+        .register_asset(Asset::new(usdc.clone(), 0).unwrap())
+        .unwrap();
+
+    let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+    exchange
+        .create_market(pair.clone(), Price::new(5).unwrap(), Quantity::new(20))
+        .unwrap();
+
+    let alice = UserId::new(1);
+    let bob = UserId::new(2);
+    exchange.deposit(alice, &eth, AssetAmount::new(40)).unwrap();
+
+    let stop_price = Price::new(100).unwrap();
+    let limit_price = Price::new(95).unwrap();
+
+    exchange
+        .place_stop_limit_order(
+            alice,
+            &pair,
+            Side::Sell,
+            stop_price,
+            limit_price,
+            Quantity::new(40),
+        )
+        .unwrap();
+
+    assert_eq!(
+        exchange.cancel_order(bob, &pair, OrderId::new(1)),
+        Err(ExchangeError::OrderNotOwnedByUser)
+    );
+
+    let alice_eth = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth.available(), AssetAmount::new(0));
+    assert_eq!(alice_eth.locked(), AssetAmount::new(40));
+
+    let cancelled = exchange
+        .cancel_order(alice, &pair, OrderId::new(1))
+        .unwrap();
+    assert!(matches!(cancelled, CancelledOrder::PendingStop(_)));
+
+    let alice_eth_after = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth_after.available(), AssetAmount::new(40));
+    assert_eq!(alice_eth_after.locked(), AssetAmount::new(0));
+}
+
+#[test]
+fn stop_limit_insufficient_funds_rolls_back_market_and_order_id() {
+    let mut exchange = Exchange::new();
+
+    let eth = AssetSymbol::new("ETH").unwrap();
+    let usdc = AssetSymbol::new("USDC").unwrap();
+    exchange
+        .register_asset(Asset::new(eth.clone(), 0).unwrap())
+        .unwrap();
+    exchange
+        .register_asset(Asset::new(usdc.clone(), 0).unwrap())
+        .unwrap();
+
+    let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+    exchange
+        .create_market(pair.clone(), Price::new(5).unwrap(), Quantity::new(20))
+        .unwrap();
+
+    let alice = UserId::new(1);
+    exchange.deposit(alice, &eth, AssetAmount::new(20)).unwrap();
+
+    let stop_price = Price::new(100).unwrap();
+    let limit_price = Price::new(95).unwrap();
+
+    assert_eq!(
+        exchange.place_stop_limit_order(
+            alice,
+            &pair,
+            Side::Sell,
+            stop_price,
+            limit_price,
+            Quantity::new(40)
+        ),
+        Err(ExchangeError::Ledger(LedgerError::InsufficientAvailable))
+    );
+
+    let alice_eth = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth.available(), AssetAmount::new(20));
+    assert_eq!(alice_eth.locked(), AssetAmount::new(0));
+
+    exchange.deposit(alice, &eth, AssetAmount::new(20)).unwrap();
+
+    let order_id = exchange
+        .place_stop_limit_order(
+            alice,
+            &pair,
+            Side::Sell,
+            stop_price,
+            limit_price,
+            Quantity::new(40),
+        )
+        .unwrap();
+    assert_eq!(order_id, OrderId::new(1));
+}
+
+#[test]
+fn buy_stop_limit_locks_quote_and_remains_pending() {
+    let mut exchange = Exchange::new();
+
+    let alice = UserId::new(1);
+    let eth = AssetSymbol::new("ETH").unwrap();
+    let usdc = AssetSymbol::new("USDC").unwrap();
+
+    exchange
+        .register_asset(Asset::new(eth.clone(), 0).unwrap())
+        .unwrap();
+    exchange
+        .register_asset(Asset::new(usdc.clone(), 0).unwrap())
+        .unwrap();
+
+    let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+
+    exchange
+        .create_market(pair.clone(), Price::new(1).unwrap(), Quantity::new(2))
+        .unwrap();
+
+    exchange
+        .deposit(alice, &usdc, AssetAmount::new(300))
+        .unwrap();
+
+    let stop_price = Price::new(110).unwrap();
+    let limit_price = Price::new(115).unwrap();
+    let quantity = Quantity::new(2);
+
+    let order_id = exchange
+        .place_stop_limit_order(alice, &pair, Side::Buy, stop_price, limit_price, quantity)
+        .unwrap();
+
+    assert_eq!(order_id, OrderId::new(1));
+
+    let alice_usdc = exchange.ledger().balance(alice, &usdc);
+    assert_eq!(alice_usdc.locked(), AssetAmount::new(230));
+    assert_eq!(alice_usdc.available(), AssetAmount::new(70));
+    let alice_eth = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth.available(), AssetAmount::new(0));
+    assert_eq!(alice_eth.locked(), AssetAmount::new(0));
+
+    let order_book = exchange.market(&pair).unwrap().order_book();
+
+    assert_eq!(order_book.best_bid(), None);
+    assert_eq!(order_book.best_ask(), None);
+}
+
+#[test]
+fn triggered_buy_stop_settles_trade_and_refunds_price_improvement() {
+    let mut exchange = Exchange::new();
+
+    let alice = UserId::new(1);
+    let bob = UserId::new(2);
+    let carol = UserId::new(3);
+    let dave = UserId::new(4);
+
+    let eth = AssetSymbol::new("ETH").unwrap();
+    let usdc = AssetSymbol::new("USDC").unwrap();
+
+    exchange
+        .register_asset(Asset::new(eth.clone(), 0).unwrap())
+        .unwrap();
+    exchange
+        .register_asset(Asset::new(usdc.clone(), 0).unwrap())
+        .unwrap();
+
+    let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+
+    exchange
+        .create_market(pair.clone(), Price::new(1).unwrap(), Quantity::new(1))
+        .unwrap();
+
+    exchange
+        .deposit(alice, &usdc, AssetAmount::new(230))
+        .unwrap();
+
+    exchange.deposit(bob, &eth, AssetAmount::new(1)).unwrap();
+
+    exchange.deposit(carol, &eth, AssetAmount::new(2)).unwrap();
+
+    exchange
+        .deposit(dave, &usdc, AssetAmount::new(110))
+        .unwrap();
+
+    let alice_order_id = exchange
+        .place_stop_limit_order(
+            alice,
+            &pair,
+            Side::Buy,
+            Price::new(110).unwrap(),
+            Price::new(115).unwrap(),
+            Quantity::new(2),
+        )
+        .unwrap();
+
+    assert_eq!(alice_order_id, OrderId::new(1));
+
+    let bob_result = exchange
+        .place_limit_order(
+            bob,
+            &pair,
+            Side::Sell,
+            Price::new(110).unwrap(),
+            Quantity::new(1),
+        )
+        .unwrap();
+
+    assert_eq!(bob_result.order_id(), OrderId::new(2));
+    assert!(bob_result.trades().is_empty());
+
+    let carol_result = exchange
+        .place_limit_order(
+            carol,
+            &pair,
+            Side::Sell,
+            Price::new(112).unwrap(),
+            Quantity::new(2),
+        )
+        .unwrap();
+
+    assert_eq!(carol_result.order_id(), OrderId::new(3));
+    assert!(carol_result.trades().is_empty());
+
+    let dave_result = exchange
+        .place_limit_order(
+            dave,
+            &pair,
+            Side::Buy,
+            Price::new(110).unwrap(),
+            Quantity::new(1),
+        )
+        .unwrap();
+
+    assert_eq!(dave_result.order_id(), OrderId::new(4));
+    assert_eq!(dave_result.unfilled_quantity(), Quantity::new(0));
+
+    let trades = dave_result.trades();
+    assert_eq!(trades.len(), 2);
+
+    assert_eq!(trades[0].maker_order_id(), OrderId::new(2));
+    assert_eq!(trades[0].taker_order_id(), OrderId::new(4));
+    assert_eq!(trades[0].maker_user_id(), bob);
+    assert_eq!(trades[0].taker_user_id(), dave);
+    assert_eq!(trades[0].taker_side(), Side::Buy);
+    assert_eq!(trades[0].price(), Price::new(110).unwrap());
+    assert_eq!(trades[0].quantity(), Quantity::new(1));
+    assert_eq!(
+        trades[0].taker_limit_price(),
+        Some(Price::new(110).unwrap())
+    );
+
+    assert_eq!(trades[1].maker_order_id(), OrderId::new(3));
+    assert_eq!(trades[1].taker_order_id(), OrderId::new(1));
+    assert_eq!(trades[1].maker_user_id(), carol);
+    assert_eq!(trades[1].taker_user_id(), alice);
+    assert_eq!(trades[1].taker_side(), Side::Buy);
+    assert_eq!(trades[1].price(), Price::new(112).unwrap());
+    assert_eq!(trades[1].quantity(), Quantity::new(2));
+    assert_eq!(
+        trades[1].taker_limit_price(),
+        Some(Price::new(115).unwrap())
+    );
+
+    let alice_usdc = exchange.ledger().balance(alice, &usdc);
+    assert_eq!(alice_usdc.available(), AssetAmount::new(6));
+    assert_eq!(alice_usdc.locked(), AssetAmount::new(0));
+
+    let alice_eth = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth.available(), AssetAmount::new(2));
+    assert_eq!(alice_eth.locked(), AssetAmount::new(0));
+
+    let bob_eth = exchange.ledger().balance(bob, &eth);
+    assert_eq!(bob_eth.available(), AssetAmount::new(0));
+    assert_eq!(bob_eth.locked(), AssetAmount::new(0));
+
+    let bob_usdc = exchange.ledger().balance(bob, &usdc);
+    assert_eq!(bob_usdc.available(), AssetAmount::new(110));
+    assert_eq!(bob_usdc.locked(), AssetAmount::new(0));
+
+    let carol_eth = exchange.ledger().balance(carol, &eth);
+    assert_eq!(carol_eth.available(), AssetAmount::new(0));
+    assert_eq!(carol_eth.locked(), AssetAmount::new(0));
+
+    let carol_usdc = exchange.ledger().balance(carol, &usdc);
+    assert_eq!(carol_usdc.available(), AssetAmount::new(224));
+    assert_eq!(carol_usdc.locked(), AssetAmount::new(0));
+
+    let dave_usdc = exchange.ledger().balance(dave, &usdc);
+    assert_eq!(dave_usdc.available(), AssetAmount::new(0));
+    assert_eq!(dave_usdc.locked(), AssetAmount::new(0));
+
+    let dave_eth = exchange.ledger().balance(dave, &eth);
+    assert_eq!(dave_eth.available(), AssetAmount::new(1));
+    assert_eq!(dave_eth.locked(), AssetAmount::new(0));
+
+    let market = exchange.market(&pair).unwrap();
+
+    assert_eq!(market.last_trade_price(), Some(Price::new(112).unwrap()));
+    assert_eq!(market.order_book().best_bid(), None);
+    assert_eq!(market.order_book().best_ask(), None);
+}
+
+#[test]
+fn cancelling_pending_buy_stop_unlocks_full_quote_amount() {
+    let mut exchange = Exchange::new();
+
+    let alice = UserId::new(1);
+    let eth = AssetSymbol::new("ETH").unwrap();
+    let usdc = AssetSymbol::new("USDC").unwrap();
+
+    exchange
+        .register_asset(Asset::new(eth.clone(), 0).unwrap())
+        .unwrap();
+
+    exchange
+        .register_asset(Asset::new(usdc.clone(), 0).unwrap())
+        .unwrap();
+
+    let pair = TradingPair::new(eth.clone(), usdc.clone()).unwrap();
+
+    exchange
+        .create_market(
+            pair.clone(),
+            Price::new(1).unwrap(),
+            Quantity::new(1),
+        )
+        .unwrap();
+
+    exchange
+        .deposit(alice, &usdc, AssetAmount::new(230))
+        .unwrap();
+
+    let stop_price = Price::new(110).unwrap();
+    let limit_price = Price::new(115).unwrap();
+    let quantity = Quantity::new(2);
+
+    let order_id = exchange
+        .place_stop_limit_order(
+            alice,
+            &pair,
+            Side::Buy,
+            stop_price,
+            limit_price,
+            quantity,
+        )
+        .unwrap();
+
+    assert_eq!(order_id, OrderId::new(1));
+
+    let alice_usdc_before = exchange.ledger().balance(alice, &usdc);
+    assert_eq!(
+        alice_usdc_before.available(),
+        AssetAmount::new(0)
+    );
+    assert_eq!(
+        alice_usdc_before.locked(),
+        AssetAmount::new(230)
+    );
+
+    let cancelled = exchange
+        .cancel_order(alice, &pair, order_id)
+        .unwrap();
+
+    assert!(matches!(
+        &cancelled,
+        CancelledOrder::PendingStop(_)
+    ));
+    assert_eq!(cancelled.id(), order_id);
+    assert_eq!(cancelled.user_id(), alice);
+    assert_eq!(cancelled.side(), Side::Buy);
+    assert_eq!(cancelled.stop_price(), Some(stop_price));
+    assert_eq!(cancelled.limit_price(), Some(limit_price));
+    assert_eq!(cancelled.original_quantity(), quantity);
+    assert_eq!(cancelled.remaining_quantity(), quantity);
+    assert_eq!(cancelled.sequence(), None);
+
+    let alice_usdc_after = exchange.ledger().balance(alice, &usdc);
+    assert_eq!(
+        alice_usdc_after.available(),
+        AssetAmount::new(230)
+    );
+    assert_eq!(
+        alice_usdc_after.locked(),
+        AssetAmount::new(0)
+    );
+
+    let alice_eth = exchange.ledger().balance(alice, &eth);
+    assert_eq!(alice_eth.available(), AssetAmount::new(0));
+    assert_eq!(alice_eth.locked(), AssetAmount::new(0));
+
+    assert_eq!(
+        exchange.cancel_order(alice, &pair, order_id),
+        Err(ExchangeError::Cancel(CancelError::OrderNotFound))
+    );
+}

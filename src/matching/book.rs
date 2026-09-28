@@ -41,6 +41,10 @@ impl PlacementResult {
     pub fn unfilled_quantity(&self) -> Quantity {
         self.unfilled_quantity
     }
+
+    pub(crate) fn append_trades_from(&mut self, other: PlacementResult) {
+        self.trades.extend(other.trades);
+    }
 }
 
 impl PriceLevel {
@@ -159,6 +163,7 @@ impl OrderBook {
             incoming.side(),
             resting_price,
             quantity,
+            incoming.limit_price(),
         );
 
         incoming

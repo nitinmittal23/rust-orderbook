@@ -1,8 +1,80 @@
-use crate::domain::asset::Asset;
-use crate::domain::order::{Order, OrderError, OrderKind, Side};
-use crate::domain::pair::TradingPair;
-use crate::domain::primitives::{AssetAmount, OrderId, Price, Quantity, SequenceNumber, UserId};
-use crate::matching::book::{CancelError, OrderBook, PlacementResult};
+use crate::{
+    domain::{
+        asset::Asset,
+        order::{Order, OrderError, OrderKind, Side},
+        pair::TradingPair,
+        primitives::{AssetAmount, OrderId, Price, Quantity, SequenceNumber, UserId},
+        stop_order::{StopLimitOrder, StopOrderError},
+    },
+    matching::{
+        book::{CancelError, OrderBook, PlacementResult},
+        stop_book::StopOrderBook,
+    },
+};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CancelledOrder {
+    Active(Order),
+    PendingStop(StopLimitOrder),
+}
+
+impl CancelledOrder {
+    pub fn id(&self) -> OrderId {
+        match self {
+            Self::Active(order) => order.id(),
+            Self::PendingStop(stop) => stop.id(),
+        }
+    }
+
+    pub fn user_id(&self) -> UserId {
+        match self {
+            Self::Active(order) => order.user_id(),
+            Self::PendingStop(stop) => stop.user_id(),
+        }
+    }
+
+    pub fn side(&self) -> Side {
+        match self {
+            Self::Active(order) => order.side(),
+            Self::PendingStop(stop) => stop.side(),
+        }
+    }
+
+    pub fn limit_price(&self) -> Option<Price> {
+        match self {
+            Self::Active(order) => order.limit_price(),
+            Self::PendingStop(stop) => Some(stop.limit_price()),
+        }
+    }
+
+    pub fn original_quantity(&self) -> Quantity {
+        match self {
+            Self::Active(order) => order.original_quantity(),
+            Self::PendingStop(stop) => stop.quantity(),
+        }
+    }
+
+    pub fn remaining_quantity(&self) -> Quantity {
+        match self {
+            Self::Active(order) => order.remaining_quantity(),
+            Self::PendingStop(stop) => stop.quantity(),
+        }
+    }
+
+    pub fn stop_price(&self) -> Option<Price> {
+        match self {
+            Self::Active(_) => None,
+            Self::PendingStop(stop) => Some(stop.stop_price()),
+        }
+    }
+
+    pub fn sequence(&self) -> Option<SequenceNumber> {
+        match self {
+            Self::Active(order) => Some(order.sequence()),
+            Self::PendingStop(_) => None,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum QuoteAmountError {
@@ -24,12 +96,16 @@ pub enum MarketOrderError {
     InvalidOrder(OrderError),
     PriceNotAligned,
     QuantityNotAligned,
+    InvalidStopOrder(StopOrderError),
+    StopWouldTriggerImmediately,
 }
 
 #[derive(Clone)]
 pub struct Market {
     pair: TradingPair,
     order_book: OrderBook,
+    stop_order_book: StopOrderBook,
+    last_trade_price: Option<Price>,
     base_scale: u128,
     price_tick: Price,
     quantity_step: Quantity,
@@ -63,6 +139,8 @@ impl Market {
         Ok(Self {
             pair,
             order_book: OrderBook::new(),
+            stop_order_book: StopOrderBook::default(),
+            last_trade_price: None,
             base_scale: base_asset.scale(),
             price_tick,
             quantity_step,
@@ -76,6 +154,10 @@ impl Market {
 
     pub fn order_book(&self) -> &OrderBook {
         &self.order_book
+    }
+
+    pub fn last_trade_price(&self) -> Option<Price> {
+        self.last_trade_price
     }
 
     pub fn calculate_quote_amount(
@@ -94,7 +176,7 @@ impl Market {
         Ok(AssetAmount::new(product / scale))
     }
 
-    fn validate_quantity_and_sequence(&self, quantity: Quantity) -> Result<(), MarketOrderError> {
+    fn validate_quantity(&self, quantity: Quantity) -> Result<(), MarketOrderError> {
         if quantity.is_zero() {
             return Err(MarketOrderError::InvalidOrder(OrderError::ZeroQuantity));
         }
@@ -102,10 +184,21 @@ impl Market {
         if quantity.value() % self.quantity_step.value() != 0 {
             return Err(MarketOrderError::QuantityNotAligned);
         }
+        Ok(())
+    }
 
+    fn validate_sequence_available(&self) -> Result<(), MarketOrderError> {
         self.next_sequence_number
             .checked_add(1)
             .ok_or(MarketOrderError::SequenceExhausted)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_price(&self, price: Price) -> Result<(), MarketOrderError> {
+        if price.value() % self.price_tick.value() != 0 {
+            return Err(MarketOrderError::PriceNotAligned);
+        }
+
         Ok(())
     }
 
@@ -114,17 +207,50 @@ impl Market {
         price: Price,
         quantity: Quantity,
     ) -> Result<(), MarketOrderError> {
-        self.validate_quantity_and_sequence(quantity)?;
-
-        if price.value() % self.price_tick.value() != 0 {
-            return Err(MarketOrderError::PriceNotAligned);
-        }
-
+        self.validate_quantity(quantity)?;
+        self.validate_sequence_available()?;
+        self.validate_price(price)?;
         Ok(())
     }
 
     pub(crate) fn validate_market_order(&self, quantity: Quantity) -> Result<(), MarketOrderError> {
-        self.validate_quantity_and_sequence(quantity)
+        self.validate_quantity(quantity)?;
+        self.validate_sequence_available()?;
+        Ok(())
+    }
+
+    fn allocate_sequence(&mut self) -> Result<SequenceNumber, MarketOrderError> {
+        let next_sequence_number = self
+            .next_sequence_number
+            .checked_add(1)
+            .ok_or(MarketOrderError::SequenceExhausted)?;
+        let sequence = SequenceNumber::new(self.next_sequence_number);
+        self.next_sequence_number = next_sequence_number;
+        Ok(sequence)
+    }
+
+    fn place_active_order(&mut self, order: Order) -> Result<PlacementResult, MarketOrderError> {
+        let mut outcome = self.order_book.place(order);
+        let mut next_trade_index = 0;
+
+        while next_trade_index < outcome.trades().len() {
+            let trade_price = outcome.trades()[next_trade_index].price();
+            next_trade_index += 1;
+
+            self.last_trade_price = Some(trade_price);
+            let triggered_stops = self.stop_order_book.take_triggered(trade_price);
+
+            for stop in triggered_stops {
+                let sequence = self.allocate_sequence()?;
+                let active_order = stop
+                    .into_active_order(sequence)
+                    .map_err(MarketOrderError::InvalidOrder)?;
+                let triggered_outcome = self.order_book.place(active_order);
+                outcome.append_trades_from(triggered_outcome);
+            }
+        }
+
+        Ok(outcome)
     }
 
     pub(crate) fn place_limit_order(
@@ -137,11 +263,7 @@ impl Market {
     ) -> Result<PlacementResult, MarketOrderError> {
         self.validate_limit_order(price, quantity)?;
 
-        let next_sequence_number = self
-            .next_sequence_number
-            .checked_add(1)
-            .ok_or(MarketOrderError::SequenceExhausted)?;
-        let sequence = SequenceNumber::new(self.next_sequence_number);
+        let sequence = self.allocate_sequence()?;
 
         let order = Order::new(
             order_id,
@@ -153,8 +275,7 @@ impl Market {
         )
         .map_err(MarketOrderError::InvalidOrder)?;
 
-        self.next_sequence_number = next_sequence_number;
-        Ok(self.order_book.place(order))
+        self.place_active_order(order)
     }
 
     pub(crate) fn place_market_order(
@@ -166,11 +287,7 @@ impl Market {
     ) -> Result<PlacementResult, MarketOrderError> {
         self.validate_market_order(quantity)?;
 
-        let next_sequence_number = self
-            .next_sequence_number
-            .checked_add(1)
-            .ok_or(MarketOrderError::SequenceExhausted)?;
-        let sequence = SequenceNumber::new(self.next_sequence_number);
+        let sequence = self.allocate_sequence()?;
 
         let order = Order::new(
             order_id,
@@ -182,12 +299,44 @@ impl Market {
         )
         .map_err(MarketOrderError::InvalidOrder)?;
 
-        self.next_sequence_number = next_sequence_number;
-        Ok(self.order_book.place(order))
+        self.place_active_order(order)
     }
 
-    pub(crate) fn cancel(&mut self, order_id: OrderId) -> Result<Order, CancelError> {
-        self.order_book.cancel(order_id)
+    pub(crate) fn place_stop_limit_order(
+        &mut self,
+        order_id: OrderId,
+        user_id: UserId,
+        side: Side,
+        stop_price: Price,
+        limit_price: Price,
+        quantity: Quantity,
+    ) -> Result<(), MarketOrderError> {
+        let order = StopLimitOrder::new(order_id, user_id, side, stop_price, limit_price, quantity)
+            .map_err(MarketOrderError::InvalidStopOrder)?;
+
+        self.validate_quantity(quantity)?;
+        self.validate_price(stop_price)?;
+        self.validate_price(limit_price)?;
+
+        if self
+            .last_trade_price
+            .is_some_and(|price| order.is_triggered_by(price))
+        {
+            return Err(MarketOrderError::StopWouldTriggerImmediately);
+        }
+
+        self.stop_order_book.add(order);
+        Ok(())
+    }
+
+    pub(crate) fn cancel(&mut self, order_id: OrderId) -> Result<CancelledOrder, CancelError> {
+        if let Ok(order) = self.order_book.cancel(order_id) {
+            return Ok(CancelledOrder::Active(order));
+        }
+        self.stop_order_book
+            .cancel(order_id)
+            .map(CancelledOrder::PendingStop)
+            .ok_or(CancelError::OrderNotFound)
     }
 }
 
@@ -321,7 +470,7 @@ mod tests {
         let cancelled = market.cancel(OrderId::new(1)).unwrap();
         assert_eq!(cancelled.id(), OrderId::new(1));
         assert_eq!(market.order_book().best_bid(), None);
-        assert_eq!(cancelled.sequence(), SequenceNumber::new(1));
+        assert_eq!(cancelled.sequence(), Some(SequenceNumber::new(1)));
 
         market
             .place_limit_order(
@@ -335,7 +484,7 @@ mod tests {
 
         let second = market.cancel(OrderId::new(2)).unwrap();
 
-        assert_eq!(second.sequence(), SequenceNumber::new(2));
+        assert_eq!(second.sequence(), Some(SequenceNumber::new(2)));
     }
 
     #[test]
@@ -387,7 +536,7 @@ mod tests {
             .unwrap();
 
         let valid_order = market.cancel(OrderId::new(3)).unwrap();
-        assert_eq!(valid_order.sequence(), SequenceNumber::new(1));
+        assert_eq!(valid_order.sequence(), Some(SequenceNumber::new(1)));
     }
 
     #[test]
@@ -495,5 +644,363 @@ mod tests {
         let order_book = market.order_book();
         assert_eq!(order_book.best_ask(), None);
         assert_eq!(order_book.best_bid(), None);
+    }
+
+    #[test]
+    fn stop_limit_order_remains_pending_and_does_not_consume_sequence() {
+        let eth_usdc = TradingPair::new(
+            AssetSymbol::new("ETH").unwrap(),
+            AssetSymbol::new("USDC").unwrap(),
+        )
+        .unwrap();
+
+        let eth = Asset::new(AssetSymbol::new("ETH").unwrap(), 0).unwrap();
+
+        let price_tick = Price::new(5).unwrap();
+        let quantity_step = Quantity::new(20);
+        let mut market = Market::new(eth_usdc, &eth, price_tick, quantity_step).unwrap();
+
+        market
+            .place_stop_limit_order(
+                OrderId::new(1),
+                UserId::new(1),
+                Side::Sell,
+                Price::new(100).unwrap(),
+                Price::new(95).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        assert_eq!(market.order_book().best_ask(), None);
+        assert_eq!(market.order_book().best_bid(), None);
+
+        let orders = market
+            .stop_order_book
+            .take_triggered(Price::new(100).unwrap());
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].id(), OrderId::new(1));
+
+        market
+            .place_limit_order(
+                OrderId::new(2),
+                UserId::new(2),
+                Side::Sell,
+                Price::new(100).unwrap(),
+                Quantity::new(100),
+            )
+            .unwrap();
+        let cancelled_order = market.cancel(OrderId::new(2)).unwrap();
+        assert_eq!(cancelled_order.id(), OrderId::new(2));
+        assert_eq!(cancelled_order.sequence(), Some(SequenceNumber::new(1)));
+    }
+
+    #[test]
+    fn trade_triggers_stop_limit_and_processes_its_generated_trade() {
+        let eth_usdc = TradingPair::new(
+            AssetSymbol::new("ETH").unwrap(),
+            AssetSymbol::new("USDC").unwrap(),
+        )
+        .unwrap();
+
+        let eth = Asset::new(AssetSymbol::new("ETH").unwrap(), 0).unwrap();
+
+        let price_tick = Price::new(5).unwrap();
+        let quantity_step = Quantity::new(20);
+        let mut market = Market::new(eth_usdc, &eth, price_tick, quantity_step).unwrap();
+
+        let bob_result = market
+            .place_limit_order(
+                OrderId::new(1),
+                UserId::new(1),
+                Side::Buy,
+                Price::new(100).unwrap(),
+                Quantity::new(40),
+            )
+            .unwrap();
+        assert!(bob_result.trades().is_empty());
+        assert_eq!(
+            market.order_book().best_bid(),
+            Some(Price::new(100).unwrap())
+        );
+
+        market
+            .place_stop_limit_order(
+                OrderId::new(2),
+                UserId::new(2),
+                Side::Sell,
+                Price::new(100).unwrap(),
+                Price::new(95).unwrap(),
+                Quantity::new(40),
+            )
+            .unwrap();
+
+        let carol_result = market
+            .place_limit_order(
+                OrderId::new(3),
+                UserId::new(3),
+                Side::Sell,
+                Price::new(100).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+        assert_eq!(carol_result.trades().len(), 2);
+        assert_eq!(carol_result.unfilled_quantity(), Quantity::new(0));
+
+        let trades = carol_result.trades();
+
+        assert_eq!(trades[0].maker_order_id(), OrderId::new(1));
+        assert_eq!(trades[0].maker_user_id(), UserId::new(1));
+        assert_eq!(trades[0].taker_order_id(), OrderId::new(3));
+        assert_eq!(trades[0].taker_user_id(), UserId::new(3));
+        assert_eq!(trades[0].taker_side(), Side::Sell);
+        assert_eq!(trades[0].price(), Price::new(100).unwrap());
+        assert_eq!(trades[0].quantity(), Quantity::new(20));
+
+        assert_eq!(trades[1].maker_order_id(), OrderId::new(1));
+        assert_eq!(trades[1].maker_user_id(), UserId::new(1));
+        assert_eq!(trades[1].taker_order_id(), OrderId::new(2));
+        assert_eq!(trades[1].taker_user_id(), UserId::new(2));
+        assert_eq!(trades[1].taker_side(), Side::Sell);
+        assert_eq!(trades[1].price(), Price::new(100).unwrap());
+        assert_eq!(trades[1].quantity(), Quantity::new(20));
+
+        assert_eq!(market.last_trade_price(), Some(Price::new(100).unwrap()));
+        assert_eq!(market.order_book().best_bid(), None);
+
+        assert_eq!(
+            market.order_book().best_ask(),
+            Some(Price::new(95).unwrap())
+        );
+        let alice_remainder = market.cancel(OrderId::new(2)).unwrap();
+
+        assert_eq!(alice_remainder.sequence(), Some(SequenceNumber::new(3)));
+        assert_eq!(alice_remainder.remaining_quantity(), Quantity::new(20));
+        assert_eq!(alice_remainder.limit_price(), Some(Price::new(95).unwrap()));
+    }
+
+    #[test]
+    fn stop_limit_that_would_trigger_immediately_is_rejected() {
+        let eth_usdc = TradingPair::new(
+            AssetSymbol::new("ETH").unwrap(),
+            AssetSymbol::new("USDC").unwrap(),
+        )
+        .unwrap();
+
+        let eth = Asset::new(AssetSymbol::new("ETH").unwrap(), 0).unwrap();
+
+        let price_tick = Price::new(5).unwrap();
+        let quantity_step = Quantity::new(20);
+        let mut market = Market::new(eth_usdc, &eth, price_tick, quantity_step).unwrap();
+
+        let bob_result = market
+            .place_limit_order(
+                OrderId::new(1),
+                UserId::new(1),
+                Side::Buy,
+                Price::new(100).unwrap(),
+                Quantity::new(40),
+            )
+            .unwrap();
+        assert!(bob_result.trades().is_empty());
+        assert_eq!(
+            market.order_book().best_bid(),
+            Some(Price::new(100).unwrap())
+        );
+
+        let carol_result = market
+            .place_limit_order(
+                OrderId::new(3),
+                UserId::new(3),
+                Side::Sell,
+                Price::new(100).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+        assert_eq!(carol_result.trades().len(), 1);
+        assert_eq!(carol_result.unfilled_quantity(), Quantity::new(0));
+
+        let trades = carol_result.trades();
+
+        assert_eq!(trades[0].maker_order_id(), OrderId::new(1));
+        assert_eq!(trades[0].maker_user_id(), UserId::new(1));
+        assert_eq!(trades[0].taker_order_id(), OrderId::new(3));
+        assert_eq!(trades[0].taker_user_id(), UserId::new(3));
+        assert_eq!(trades[0].taker_side(), Side::Sell);
+        assert_eq!(trades[0].price(), Price::new(100).unwrap());
+        assert_eq!(trades[0].quantity(), Quantity::new(20));
+
+        assert_eq!(
+            market.place_stop_limit_order(
+                OrderId::new(2),
+                UserId::new(2),
+                Side::Sell,
+                Price::new(110).unwrap(),
+                Price::new(105).unwrap(),
+                Quantity::new(40),
+            ),
+            Err(MarketOrderError::StopWouldTriggerImmediately)
+        );
+
+        assert_eq!(market.stop_order_book.cancel(OrderId::new(2)), None);
+
+        assert_eq!(market.order_book().best_ask(), None);
+        assert_eq!(
+            market.order_book().best_bid(),
+            Some(Price::new(100).unwrap())
+        );
+        assert_eq!(market.last_trade_price(), Some(Price::new(100).unwrap()));
+
+        market
+            .place_limit_order(
+                OrderId::new(4),
+                UserId::new(4),
+                Side::Sell,
+                Price::new(105).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+        let next_order = market.cancel(OrderId::new(4)).unwrap();
+        assert_eq!(next_order.sequence(), Some(SequenceNumber::new(3)));
+    }
+
+    #[test]
+    fn buy_stop_limit_remains_pending_below_trigger_price() {
+        let eth_usdc = TradingPair::new(
+            AssetSymbol::new("ETH").unwrap(),
+            AssetSymbol::new("USDC").unwrap(),
+        )
+        .unwrap();
+
+        let eth = Asset::new(AssetSymbol::new("ETH").unwrap(), 0).unwrap();
+
+        let mut market =
+            Market::new(eth_usdc, &eth, Price::new(5).unwrap(), Quantity::new(20)).unwrap();
+
+        market
+            .place_limit_order(
+                OrderId::new(1),
+                UserId::new(1),
+                Side::Sell,
+                Price::new(90).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        market
+            .place_limit_order(
+                OrderId::new(2),
+                UserId::new(2),
+                Side::Buy,
+                Price::new(90).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        assert_eq!(market.last_trade_price(), Some(Price::new(90).unwrap()));
+
+        market
+            .place_stop_limit_order(
+                OrderId::new(3),
+                UserId::new(3),
+                Side::Buy,
+                Price::new(100).unwrap(),
+                Price::new(105).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        assert_eq!(market.order_book().best_ask(), None);
+        assert_eq!(market.order_book().best_bid(), None);
+
+        let cancelled = market.cancel(OrderId::new(3)).unwrap();
+
+        assert!(matches!(&cancelled, CancelledOrder::PendingStop(_)));
+        assert_eq!(cancelled.side(), Side::Buy);
+        assert_eq!(cancelled.stop_price(), Some(Price::new(100).unwrap()));
+        assert_eq!(cancelled.limit_price(), Some(Price::new(105).unwrap()));
+        assert_eq!(cancelled.sequence(), None);
+    }
+
+    #[test]
+    fn trade_at_or_above_stop_price_activates_buy_stop() {
+        let eth_usdc = TradingPair::new(
+            AssetSymbol::new("ETH").unwrap(),
+            AssetSymbol::new("USDC").unwrap(),
+        )
+        .unwrap();
+
+        let eth = Asset::new(AssetSymbol::new("ETH").unwrap(), 0).unwrap();
+
+        let mut market =
+            Market::new(eth_usdc, &eth, Price::new(5).unwrap(), Quantity::new(20)).unwrap();
+
+        market
+            .place_limit_order(
+                OrderId::new(1),
+                UserId::new(1),
+                Side::Sell,
+                Price::new(90).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        market
+            .place_limit_order(
+                OrderId::new(2),
+                UserId::new(2),
+                Side::Buy,
+                Price::new(90).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        market
+            .place_stop_limit_order(
+                OrderId::new(3),
+                UserId::new(3),
+                Side::Buy,
+                Price::new(100).unwrap(),
+                Price::new(105).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        market
+            .place_limit_order(
+                OrderId::new(4),
+                UserId::new(4),
+                Side::Sell,
+                Price::new(100).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        let outcome = market
+            .place_limit_order(
+                OrderId::new(5),
+                UserId::new(5),
+                Side::Buy,
+                Price::new(100).unwrap(),
+                Quantity::new(20),
+            )
+            .unwrap();
+
+        assert_eq!(outcome.trades().len(), 1);
+        assert_eq!(outcome.trades()[0].price(), Price::new(100).unwrap());
+        assert_eq!(market.last_trade_price(), Some(Price::new(100).unwrap()));
+
+        assert_eq!(
+            market.order_book().best_bid(),
+            Some(Price::new(105).unwrap())
+        );
+        assert_eq!(market.order_book().best_ask(), None);
+
+        let cancelled = market.cancel(OrderId::new(3)).unwrap();
+
+        assert!(matches!(&cancelled, CancelledOrder::Active(_)));
+        assert_eq!(cancelled.side(), Side::Buy);
+        assert_eq!(cancelled.limit_price(), Some(Price::new(105).unwrap()));
+
+        assert_eq!(cancelled.sequence(), Some(SequenceNumber::new(5)));
     }
 }

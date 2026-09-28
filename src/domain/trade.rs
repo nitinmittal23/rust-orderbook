@@ -10,6 +10,7 @@ pub struct Trade {
     taker_side: Side,
     price: Price,
     quantity: Quantity,
+    taker_limit_price: Option<Price>,
 }
 
 impl Trade {
@@ -21,6 +22,7 @@ impl Trade {
         taker_side: Side,
         price: Price,
         quantity: Quantity,
+        taker_limit_price: Option<Price>,
     ) -> Self {
         Self {
             maker_order_id,
@@ -30,6 +32,7 @@ impl Trade {
             taker_side,
             price,
             quantity,
+            taker_limit_price,
         }
     }
 
@@ -60,6 +63,10 @@ impl Trade {
     pub fn quantity(&self) -> Quantity {
         self.quantity
     }
+
+    pub fn taker_limit_price(&self) -> Option<Price> {
+        self.taker_limit_price
+    }
 }
 
 #[cfg(test)]
@@ -76,6 +83,7 @@ mod tests {
             Side::Buy,
             Price::new(4).unwrap(),
             Quantity::new(100),
+            Some(Price::new(100).unwrap()),
         );
 
         assert_eq!(trade.maker_order_id(), OrderId::new(1));
@@ -85,5 +93,6 @@ mod tests {
         assert_eq!(trade.taker_side(), Side::Buy);
         assert_eq!(trade.price(), Price::new(4).unwrap());
         assert_eq!(trade.quantity(), Quantity::new(100));
+        assert_eq!(trade.taker_limit_price(), Some(Price::new(100).unwrap()));
     }
 }

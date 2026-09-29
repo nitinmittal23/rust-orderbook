@@ -12,6 +12,24 @@ pub enum OrderKind {
     Market,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderStatus {
+    PendingTrigger,
+    Open,
+    PartiallyFilled,
+    Filled,
+    Cancelled,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderStateChange {
+    order_id: OrderId,
+    status: OrderStatus,
+    remaining_quantity: Quantity,
+    sequence: Option<SequenceNumber>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Order {
     id: OrderId,
@@ -35,6 +53,38 @@ impl Side {
             Side::Buy => Side::Sell,
             Side::Sell => Side::Buy,
         }
+    }
+}
+
+impl OrderStateChange {
+    pub(crate) fn new(
+        order_id: OrderId,
+        status: OrderStatus,
+        remaining_quantity: Quantity,
+        sequence: Option<SequenceNumber>,
+    ) -> Self {
+        Self {
+            order_id,
+            status,
+            remaining_quantity,
+            sequence,
+        }
+    }
+
+    pub fn order_id(&self) -> OrderId {
+        self.order_id
+    }
+
+    pub fn status(&self) -> OrderStatus {
+        self.status
+    }
+
+    pub fn remaining_quantity(&self) -> Quantity {
+        self.remaining_quantity
+    }
+
+    pub fn sequence(&self) -> Option<SequenceNumber> {
+        self.sequence
     }
 }
 
@@ -113,6 +163,29 @@ impl Order {
 
     pub fn is_filled(&self) -> bool {
         self.remaining_quantity.is_zero()
+    }
+
+    pub(crate) fn state_change_after_matching(&self) -> OrderStateChange {
+        let status = if self.is_filled() {
+            OrderStatus::Filled
+        } else {
+            match self.kind() {
+                OrderKind::Limit { .. }
+                    if self.remaining_quantity() == self.original_quantity() =>
+                {
+                    OrderStatus::Open
+                }
+                OrderKind::Limit { .. } => OrderStatus::PartiallyFilled,
+                OrderKind::Market => OrderStatus::Expired,
+            }
+        };
+
+        OrderStateChange::new(
+            self.id(),
+            status,
+            self.remaining_quantity(),
+            Some(self.sequence()),
+        )
     }
 }
 

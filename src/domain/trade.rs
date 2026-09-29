@@ -1,5 +1,5 @@
 use crate::domain::order::Side;
-use crate::domain::primitives::{OrderId, Price, Quantity, UserId};
+use crate::domain::primitives::{OrderId, Price, Quantity, TradeSequenceNumber, UserId};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Trade {
@@ -11,6 +11,7 @@ pub struct Trade {
     price: Price,
     quantity: Quantity,
     taker_limit_price: Option<Price>,
+    sequence: Option<TradeSequenceNumber>,
 }
 
 impl Trade {
@@ -33,6 +34,7 @@ impl Trade {
             price,
             quantity,
             taker_limit_price,
+            sequence: None,
         }
     }
 
@@ -67,6 +69,18 @@ impl Trade {
     pub fn taker_limit_price(&self) -> Option<Price> {
         self.taker_limit_price
     }
+
+    pub fn sequence(&self) -> Option<TradeSequenceNumber> {
+        self.sequence
+    }
+
+    pub(crate) fn assign_sequence(&mut self, sequence: TradeSequenceNumber) {
+        assert!(
+            self.sequence.is_none(),
+            "trade sequence can only be assigned once"
+        );
+        self.sequence = Some(sequence);
+    }
 }
 
 #[cfg(test)]
@@ -94,5 +108,6 @@ mod tests {
         assert_eq!(trade.price(), Price::new(4).unwrap());
         assert_eq!(trade.quantity(), Quantity::new(100));
         assert_eq!(trade.taker_limit_price(), Some(Price::new(100).unwrap()));
+        assert_eq!(trade.sequence(), None);
     }
 }

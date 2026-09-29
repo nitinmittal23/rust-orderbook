@@ -1,9 +1,49 @@
 use crate::domain::asset::AssetSymbol;
-use crate::domain::primitives::{AssetAmount, UserId};
-use std::collections::HashMap;
+use crate::domain::primitives::{AssetAmount, OrderId, TradeSequenceNumber, UserId};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Balance {
+    available: AssetAmount,
+    locked: AssetAmount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BalanceMovementReason {
+    Deposit,
+    OrderLock {
+        order_id: OrderId,
+    },
+    OrderUnlock {
+        order_id: OrderId,
+    },
+    TradeSettlement {
+        order_id: OrderId,
+        trade_sequence: TradeSequenceNumber,
+    },
+    AdminAdjustment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BalanceDelta {
+    Increase(AssetAmount),
+    Decrease(AssetAmount),
+    Unchanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BalanceMovement {
+    user_id: UserId,
+    asset: AssetSymbol,
+    available_delta: BalanceDelta,
+    locked_delta: BalanceDelta,
+    reason: BalanceMovementReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BalanceSnapshot {
+    user_id: UserId,
+    asset: AssetSymbol,
     available: AssetAmount,
     locked: AssetAmount,
 }
@@ -13,11 +53,82 @@ pub enum LedgerError {
     InsufficientAvailable,
     InsufficientLocked,
     Overflow,
+    EmptyMovement,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Ledger {
     balances: HashMap<UserId, HashMap<AssetSymbol, Balance>>,
+}
+
+impl BalanceSnapshot {
+    pub(crate) fn new(
+        user_id: UserId,
+        asset: AssetSymbol,
+        available: AssetAmount,
+        locked: AssetAmount,
+    ) -> Self {
+        Self {
+            user_id,
+            asset,
+            available,
+            locked,
+        }
+    }
+
+    pub fn user_id(&self) -> UserId {
+        self.user_id
+    }
+
+    pub fn asset(&self) -> &AssetSymbol {
+        &self.asset
+    }
+
+    pub fn available(&self) -> AssetAmount {
+        self.available
+    }
+
+    pub fn locked(&self) -> AssetAmount {
+        self.locked
+    }
+}
+
+impl BalanceMovement {
+    pub(crate) fn new(
+        user_id: UserId,
+        asset: AssetSymbol,
+        available_delta: BalanceDelta,
+        locked_delta: BalanceDelta,
+        reason: BalanceMovementReason,
+    ) -> Self {
+        Self {
+            user_id,
+            asset,
+            available_delta,
+            locked_delta,
+            reason,
+        }
+    }
+
+    pub fn user_id(&self) -> UserId {
+        self.user_id
+    }
+
+    pub fn asset(&self) -> &AssetSymbol {
+        &self.asset
+    }
+
+    pub fn available_delta(&self) -> BalanceDelta {
+        self.available_delta
+    }
+
+    pub fn locked_delta(&self) -> BalanceDelta {
+        self.locked_delta
+    }
+
+    pub fn reason(&self) -> BalanceMovementReason {
+        self.reason
+    }
 }
 
 impl Balance {
@@ -150,6 +261,94 @@ impl Ledger {
 
         *self = staged;
         Ok(())
+    }
+
+    fn apply_available_delta(
+        current: AssetAmount,
+        delta: BalanceDelta,
+    ) -> Result<AssetAmount, LedgerError> {
+        match delta {
+            BalanceDelta::Increase(amount) => {
+                current.checked_add(amount).ok_or(LedgerError::Overflow)
+            }
+            BalanceDelta::Decrease(amount) => current
+                .checked_sub(amount)
+                .ok_or(LedgerError::InsufficientAvailable),
+            BalanceDelta::Unchanged => Ok(current),
+        }
+    }
+
+    fn apply_locked_delta(
+        current: AssetAmount,
+        delta: BalanceDelta,
+    ) -> Result<AssetAmount, LedgerError> {
+        match delta {
+            BalanceDelta::Increase(amount) => {
+                current.checked_add(amount).ok_or(LedgerError::Overflow)
+            }
+            BalanceDelta::Decrease(amount) => current
+                .checked_sub(amount)
+                .ok_or(LedgerError::InsufficientLocked),
+            BalanceDelta::Unchanged => Ok(current),
+        }
+    }
+
+    fn apply_movement(&mut self, movement: &BalanceMovement) -> Result<(), LedgerError> {
+        if movement.available_delta() == BalanceDelta::Unchanged
+            && movement.locked_delta() == BalanceDelta::Unchanged
+        {
+            return Err(LedgerError::EmptyMovement);
+        }
+
+        let balance = self.balance_mut(movement.user_id(), movement.asset());
+
+        let new_available =
+            Self::apply_available_delta(balance.available, movement.available_delta())?;
+
+        let new_locked = Self::apply_locked_delta(balance.locked, movement.locked_delta())?;
+
+        balance.available = new_available;
+        balance.locked = new_locked;
+
+        Ok(())
+    }
+
+    pub(crate) fn apply_movements(
+        &mut self,
+        movements: &[BalanceMovement],
+    ) -> Result<(), LedgerError> {
+        let mut staged = self.clone();
+        for movement in movements {
+            staged.apply_movement(movement)?;
+        }
+        *self = staged;
+        Ok(())
+    }
+
+    pub(crate) fn snapshots_for_movements(
+        &self,
+        movements: &[BalanceMovement],
+    ) -> Vec<BalanceSnapshot> {
+        let mut seen = HashSet::new();
+        let mut snapshots = Vec::new();
+
+        for movement in movements {
+            let user_id = movement.user_id();
+            let asset = movement.asset().clone();
+
+            if seen.insert((user_id, asset.clone())) {
+                let balance = self.balance(user_id, &asset);
+
+                snapshots.push(BalanceSnapshot::new(
+                    user_id,
+                    asset,
+                    balance.available(),
+                    balance.locked(),
+                ));
+            }
+        }
+
+        snapshots
     }
 }
 

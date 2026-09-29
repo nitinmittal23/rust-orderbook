@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
+use uuid::Uuid;
 
 use crate::{
     domain::{
@@ -42,12 +43,7 @@ pub async fn book_ticker(
     let pair = TradingPair::new(base_symbol, quote_symbol)
         .map_err(|_| ApiError::bad_request("INVALID_TRADING_PAIR", "invalid trading pair"))?;
 
-    let exchange = state.exchange.lock().map_err(|_| {
-        ApiError::internal(
-            "EXCHANGE_STATE_UNAVAILABLE",
-            "exchange state is unavailable",
-        )
-    })?;
+    let exchange = state.exchange.lock().await;
 
     let market = exchange
         .market(&pair)
@@ -110,6 +106,31 @@ fn parse_side(value: &str) -> Result<Side, ApiError> {
     }
 }
 
+fn resolve_client_order_id(value: Option<&str>) -> Result<String, ApiError> {
+    match value {
+        Some(value) => {
+            let value = value.trim();
+
+            if value.is_empty() {
+                return Err(ApiError::bad_request(
+                    "INVALID_CLIENT_ORDER_ID",
+                    "client order ID cannot be empty",
+                ));
+            }
+
+            if value.len() > 64 {
+                return Err(ApiError::bad_request(
+                    "INVALID_CLIENT_ORDER_ID",
+                    "client order ID cannot exceed 64 characters",
+                ));
+            }
+
+            Ok(value.to_string())
+        }
+        None => Ok(Uuid::new_v4().to_string()),
+    }
+}
+
 fn format_response_decimal(value: u128, decimals: u8) -> Result<String, ApiError> {
     format_decimal(value, decimals).map_err(|_| {
         ApiError::internal(
@@ -124,6 +145,8 @@ pub async fn place_limit_order(
     headers: HeaderMap,
     Json(request): Json<PlaceLimitOrderRequest>,
 ) -> Result<(StatusCode, Json<OrderPlacementResponse>), ApiError> {
+    let client_order_id = resolve_client_order_id(request.client_order_id.as_deref())?;
+
     let user_id = user_id_from_header(&headers)?;
 
     let base_symbol = AssetSymbol::new(&request.base)
@@ -137,12 +160,7 @@ pub async fn place_limit_order(
 
     let side = parse_side(&request.side)?;
 
-    let mut exchange = state.exchange.lock().map_err(|_| {
-        ApiError::internal(
-            "EXCHANGE_STATE_UNAVAILABLE",
-            "exchange state is unavailable",
-        )
-    })?;
+    let mut exchange = state.exchange.lock().await;
 
     if exchange.market(&pair).is_none() {
         return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
@@ -210,6 +228,7 @@ pub async fn place_limit_order(
             result.unfilled_quantity().value(),
             base_decimals,
         )?,
+        client_order_id,
     };
 
     Ok((StatusCode::CREATED, Json(response)))
@@ -225,12 +244,7 @@ pub async fn get_balance(
     let symbol = AssetSymbol::new(&asset)
         .map_err(|_| ApiError::bad_request("INVALID_ASSET_SYMBOL", "invalid asset symbol"))?;
 
-    let exchange = state.exchange.lock().map_err(|_| {
-        ApiError::internal(
-            "EXCHANGE_STATE_UNAVAILABLE",
-            "exchange state is unavailable",
-        )
-    })?;
+    let exchange = state.exchange.lock().await;
 
     let decimals = exchange
         .asset(&symbol)
@@ -271,12 +285,7 @@ pub async fn cancel_limit_order(
         .map_err(|_| ApiError::bad_request("INVALID_ORDER_ID", "invalid order id"))?;
     let order_id = OrderId::new(order_id_value);
 
-    let mut exchange = state.exchange.lock().map_err(|_| {
-        ApiError::internal(
-            "EXCHANGE_STATE_UNAVAILABLE",
-            "exchange state is unavailable",
-        )
-    })?;
+    let mut exchange = state.exchange.lock().await;
 
     if exchange.market(&pair).is_none() {
         return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
@@ -303,8 +312,9 @@ pub async fn cancel_limit_order(
         .decimals();
 
     let result = exchange.cancel_order(user_id, &pair, order_id)?;
+    let cancelled_order = result.cancelled_order();
 
-    let price = result.limit_price().ok_or_else(|| {
+    let price = cancelled_order.limit_price().ok_or_else(|| {
         ApiError::internal(
             "ORDER_CONFIGURATION_ERROR",
             "cancelled limit order has no price",
@@ -313,17 +323,17 @@ pub async fn cancel_limit_order(
     drop(exchange);
 
     let response = CancelOrderResponse {
-        order_id: result.id().value().to_string(),
+        order_id: cancelled_order.id().value().to_string(),
         price: format_response_decimal(price.value(), quote_decimals)?,
         original_quantity: format_response_decimal(
-            result.original_quantity().value(),
+            cancelled_order.original_quantity().value(),
             base_decimals,
         )?,
         remaining_quantity: format_response_decimal(
-            result.remaining_quantity().value(),
+            cancelled_order.remaining_quantity().value(),
             base_decimals,
         )?,
-        side: match result.side() {
+        side: match cancelled_order.side() {
             Side::Buy => "buy".to_string(),
             Side::Sell => "sell".to_string(),
         },
@@ -337,6 +347,15 @@ pub async fn place_market_order(
     headers: HeaderMap,
     Json(request): Json<PlaceMarketOrderRequest>,
 ) -> Result<(StatusCode, Json<OrderPlacementResponse>), ApiError> {
+    let client_order_id = match &request {
+        PlaceMarketOrderRequest::Buy {
+            client_order_id, ..
+        }
+        | PlaceMarketOrderRequest::Sell {
+            client_order_id, ..
+        } => resolve_client_order_id(client_order_id.as_deref())?,
+    };
+
     let user_id = user_id_from_header(&headers)?;
 
     let (base, quote) = match &request {
@@ -353,12 +372,7 @@ pub async fn place_market_order(
     let pair = TradingPair::new(base_symbol, quote_symbol)
         .map_err(|_| ApiError::bad_request("INVALID_TRADING_PAIR", "invalid trading pair"))?;
 
-    let mut exchange = state.exchange.lock().map_err(|_| {
-        ApiError::internal(
-            "EXCHANGE_STATE_UNAVAILABLE",
-            "exchange state is unavailable",
-        )
-    })?;
+    let mut exchange = state.exchange.lock().await;
 
     if exchange.market(&pair).is_none() {
         return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
@@ -444,6 +458,7 @@ pub async fn place_market_order(
             result.unfilled_quantity().value(),
             base_decimals,
         )?,
+        client_order_id,
     };
 
     Ok((StatusCode::CREATED, Json(response)))
@@ -455,6 +470,7 @@ pub async fn place_stop_limit_order(
     Json(request): Json<PlaceStopLimitOrderRequest>,
 ) -> Result<(StatusCode, Json<PlaceStopLimitOrderResponse>), ApiError> {
     let user_id = user_id_from_header(&headers)?;
+    let client_order_id = resolve_client_order_id(request.client_order_id.as_deref())?;
 
     let base_symbol = AssetSymbol::new(&request.base)
         .map_err(|_| ApiError::bad_request("INVALID_BASE_SYMBOL", "invalid base symbol"))?;
@@ -467,12 +483,7 @@ pub async fn place_stop_limit_order(
 
     let side = parse_side(&request.side)?;
 
-    let mut exchange = state.exchange.lock().map_err(|_| {
-        ApiError::internal(
-            "EXCHANGE_STATE_UNAVAILABLE",
-            "exchange state is unavailable",
-        )
-    })?;
+    let mut exchange = state.exchange.lock().await;
 
     if exchange.market(&pair).is_none() {
         return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
@@ -533,7 +544,8 @@ pub async fn place_stop_limit_order(
     drop(exchange);
 
     let response = PlaceStopLimitOrderResponse {
-        order_id: result.value().to_string(),
+        order_id: result.order_id().value().to_string(),
+        client_order_id,
     };
 
     Ok((StatusCode::CREATED, Json(response)))

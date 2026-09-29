@@ -15,6 +15,9 @@ pub struct PlaceLimitOrderRequest {
     pub side: String,
     pub quantity: String,
     pub price: String,
+
+    #[serde(default)]
+    pub client_order_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -22,6 +25,7 @@ pub struct OrderPlacementResponse {
     pub order_id: String,
     pub trades: Vec<TradeResponse>,
     pub unfilled_quantity: String,
+    pub client_order_id: String,
 }
 
 #[derive(Serialize)]
@@ -57,11 +61,15 @@ pub enum PlaceMarketOrderRequest {
         quote: String,
         quantity: String,
         max_quote_amount: String,
+        #[serde(default)]
+        client_order_id: Option<String>,
     },
     Sell {
         base: String,
         quote: String,
         quantity: String,
+        #[serde(default)]
+        client_order_id: Option<String>,
     },
 }
 
@@ -73,9 +81,12 @@ pub struct PlaceStopLimitOrderRequest {
     pub quantity: String,
     pub stop_price: String,
     pub limit_price: String,
+    #[serde(default)]
+    pub client_order_id: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct PlaceStopLimitOrderResponse {
     pub order_id: String,
+    pub client_order_id: String,
 }

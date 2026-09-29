@@ -1,4 +1,4 @@
-use crate::domain::order::{Order, OrderKind, Side};
+use crate::domain::order::{Order, OrderKind, OrderStateChange, Side};
 use crate::domain::primitives::{OrderId, Price, Quantity};
 use crate::domain::trade::Trade;
 use std::cmp::min;
@@ -30,6 +30,7 @@ pub struct OrderBook {
 #[derive(Debug, PartialEq, Eq)]
 pub struct PlacementResult {
     trades: Vec<Trade>,
+    order_changes: Vec<OrderStateChange>,
     unfilled_quantity: Quantity,
 }
 
@@ -42,8 +43,21 @@ impl PlacementResult {
         self.unfilled_quantity
     }
 
-    pub(crate) fn append_trades_from(&mut self, other: PlacementResult) {
+    pub(crate) fn append_changes_from(&mut self, other: PlacementResult) {
         self.trades.extend(other.trades);
+        self.order_changes.extend(other.order_changes);
+    }
+
+    pub(crate) fn trades_mut(&mut self) -> &mut [Trade] {
+        &mut self.trades
+    }
+
+    pub fn order_changes(&self) -> &[OrderStateChange] {
+        &self.order_changes
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<Trade>, Vec<OrderStateChange>, Quantity) {
+        (self.trades, self.order_changes, self.unfilled_quantity)
     }
 }
 
@@ -178,6 +192,7 @@ impl OrderBook {
 
     pub fn place(&mut self, mut incoming: Order) -> PlacementResult {
         let mut trades: Vec<Trade> = Vec::new();
+        let mut order_changes = Vec::new();
         while !incoming.is_filled() {
             let best_price = match incoming.side() {
                 Side::Buy => self.best_ask(),
@@ -195,32 +210,35 @@ impl OrderBook {
                 Side::Sell => &mut self.bids,
             };
 
-            let (trade, level_is_empty) = {
+            let (trade, maker_change, level_is_empty) = {
                 let level = opposite_levels
                     .get_mut(&best_price)
                     .expect("best price must have a price level");
-                let (trade, maker_is_filled) = {
+                let (trade, maker_is_filled, maker_change) = {
                     let resting_order = level
                         .front_mut()
                         .expect("price level must contain an order");
                     let trade = Self::execute_trade(&mut incoming, resting_order);
-                    (trade, resting_order.is_filled())
+                    let maker_change = resting_order.state_change_after_matching();
+                    (trade, resting_order.is_filled(), maker_change)
                 };
 
                 if maker_is_filled {
                     level.pop_front().expect("filled maker must exit at front");
                 }
 
-                (trade, level.is_empty())
+                (trade, maker_change, level.is_empty())
             };
 
             if level_is_empty {
                 opposite_levels.remove(&best_price);
             }
 
+            order_changes.push(maker_change);
             trades.push(trade);
         }
 
+        let incoming_change = incoming.state_change_after_matching();
         let unfilled_quantity = incoming.remaining_quantity();
         if !incoming.is_filled() {
             match incoming.kind() {
@@ -232,8 +250,10 @@ impl OrderBook {
             }
         }
 
+        order_changes.push(incoming_change);
         PlacementResult {
             trades,
+            order_changes,
             unfilled_quantity,
         }
     }

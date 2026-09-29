@@ -3,7 +3,9 @@ use crate::{
         asset::Asset,
         order::{Order, OrderError, OrderKind, Side},
         pair::TradingPair,
-        primitives::{AssetAmount, OrderId, Price, Quantity, SequenceNumber, UserId},
+        primitives::{
+            AssetAmount, OrderId, Price, Quantity, SequenceNumber, TradeSequenceNumber, UserId,
+        },
         stop_order::{StopLimitOrder, StopOrderError},
     },
     matching::{
@@ -11,6 +13,32 @@ use crate::{
         stop_book::StopOrderBook,
     },
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketSnapshot {
+    pair: TradingPair,
+    last_trade_price: Option<Price>,
+    next_order_sequence: SequenceNumber,
+    next_trade_sequence: TradeSequenceNumber,
+}
+
+impl MarketSnapshot {
+    pub fn pair(&self) -> &TradingPair {
+        &self.pair
+    }
+
+    pub fn last_trade_price(&self) -> Option<Price> {
+        self.last_trade_price
+    }
+
+    pub fn next_order_sequence(&self) -> SequenceNumber {
+        self.next_order_sequence
+    }
+
+    pub fn next_trade_sequence(&self) -> TradeSequenceNumber {
+        self.next_trade_sequence
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CancelledOrder {
@@ -98,6 +126,7 @@ pub enum MarketOrderError {
     QuantityNotAligned,
     InvalidStopOrder(StopOrderError),
     StopWouldTriggerImmediately,
+    TradeSequenceExhausted,
 }
 
 #[derive(Clone)]
@@ -110,6 +139,7 @@ pub struct Market {
     price_tick: Price,
     quantity_step: Quantity,
     next_sequence_number: u64,
+    next_trade_sequence_number: u64,
 }
 
 impl Market {
@@ -145,6 +175,7 @@ impl Market {
             price_tick,
             quantity_step,
             next_sequence_number: 1,
+            next_trade_sequence_number: 1,
         })
     }
 
@@ -158,6 +189,27 @@ impl Market {
 
     pub fn last_trade_price(&self) -> Option<Price> {
         self.last_trade_price
+    }
+
+    pub(crate) fn snapshot(&self) -> MarketSnapshot {
+        MarketSnapshot {
+            pair: self.pair.clone(),
+            last_trade_price: self.last_trade_price,
+            next_order_sequence: SequenceNumber::new(self.next_sequence_number),
+            next_trade_sequence: TradeSequenceNumber::new(self.next_trade_sequence_number),
+        }
+    }
+
+    fn allocate_trade_sequence(&mut self) -> Result<TradeSequenceNumber, MarketOrderError> {
+        let following_sequence = self
+            .next_trade_sequence_number
+            .checked_add(1)
+            .ok_or(MarketOrderError::TradeSequenceExhausted)?;
+
+        let sequence = TradeSequenceNumber::new(self.next_trade_sequence_number);
+        self.next_trade_sequence_number = following_sequence;
+
+        Ok(sequence)
     }
 
     pub fn calculate_quote_amount(
@@ -234,7 +286,12 @@ impl Market {
         let mut next_trade_index = 0;
 
         while next_trade_index < outcome.trades().len() {
-            let trade_price = outcome.trades()[next_trade_index].price();
+            let trade_sequence = self.allocate_trade_sequence()?;
+
+            let trade = &mut outcome.trades_mut()[next_trade_index];
+            trade.assign_sequence(trade_sequence);
+
+            let trade_price = trade.price();
             next_trade_index += 1;
 
             self.last_trade_price = Some(trade_price);
@@ -246,7 +303,7 @@ impl Market {
                     .into_active_order(sequence)
                     .map_err(MarketOrderError::InvalidOrder)?;
                 let triggered_outcome = self.order_book.place(active_order);
-                outcome.append_trades_from(triggered_outcome);
+                outcome.append_changes_from(triggered_outcome);
             }
         }
 

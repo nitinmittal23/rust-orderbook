@@ -636,9 +636,11 @@ fn cancelling_partially_filled_buy_unlocks_remaining_quote() {
         AssetAmount::new(2_000_000_000_000_000_000)
     );
 
-    let cancelled_order = exchange
+    let cancellation = exchange
         .cancel_order(alice, &pair, OrderId::new(1))
         .unwrap();
+    let cancelled_order = cancellation.cancelled_order();
+
     assert_eq!(cancelled_order.id(), OrderId::new(1));
     assert_eq!(
         cancelled_order.original_quantity(),
@@ -717,9 +719,10 @@ fn another_user_cannot_cancel_order_or_unlock_its_funds() {
     assert_eq!(order_book.best_bid(), Some(alice_price));
     assert_eq!(order_book.best_ask(), None);
 
-    let cancelled = exchange
+    let cancellation = exchange
         .cancel_order(alice, &pair, OrderId::new(1))
         .unwrap();
+    let cancelled = cancellation.cancelled_order();
 
     assert_eq!(cancelled.id(), OrderId::new(1));
     assert_eq!(cancelled.user_id(), alice);
@@ -765,9 +768,10 @@ fn cancelling_sell_unlocks_remaining_base() {
         .place_limit_order(alice, &pair, Side::Sell, alice_price, alice_quantity)
         .unwrap();
 
-    let cancelled_order = exchange
+    let cancellation = exchange
         .cancel_order(alice, &pair, OrderId::new(1))
         .unwrap();
+    let cancelled_order = cancellation.cancelled_order();
 
     let alice_usdc = exchange.ledger().balance(alice, &usdc);
     let alice_eth = exchange.ledger().balance(alice, &eth);
@@ -1002,9 +1006,10 @@ fn markets_keep_order_books_and_locked_funds_isolated() {
         Some(price_for_pol)
     );
 
-    let cancelled_order = exchange
+    let cancellation = exchange
         .cancel_order(alice, &eth_usdc_pair, OrderId::new(1))
         .unwrap();
+    let cancelled_order = cancellation.cancelled_order();
     assert_eq!(cancelled_order.id(), OrderId::new(1));
     assert_eq!(cancelled_order.user_id(), alice);
     assert_eq!(cancelled_order.limit_price(), Some(price_for_eth));
@@ -1323,7 +1328,8 @@ fn stop_limit_sell_locks_base_without_entering_active_book() {
 
     let order_id = exchange
         .place_stop_limit_order(alice, &pair, Side::Sell, stop_price, limit_price, quantity)
-        .unwrap();
+        .unwrap()
+        .order_id();
 
     assert_eq!(order_id, OrderId::new(1));
 
@@ -1384,7 +1390,8 @@ fn triggered_stop_limit_settles_prelocked_funds_and_rests_remainder() {
 
     let order_id = exchange
         .place_stop_limit_order(alice, &pair, Side::Sell, stop_price, limit_price, quantity)
-        .unwrap();
+        .unwrap()
+        .order_id();
     assert_eq!(order_id, OrderId::new(2));
 
     let carol_result = exchange
@@ -1483,9 +1490,10 @@ fn cancelling_pending_stop_unlocks_full_base_quantity() {
     assert_eq!(alice_eth.available(), AssetAmount::new(0));
     assert_eq!(alice_eth.locked(), AssetAmount::new(40));
 
-    let cancelled = exchange
+    let cancellation = exchange
         .cancel_order(alice, &pair, OrderId::new(1))
         .unwrap();
+    let cancelled = cancellation.cancelled_order();
 
     assert!(matches!(cancelled, CancelledOrder::PendingStop(_)));
     assert_eq!(cancelled.id(), OrderId::new(1));
@@ -1549,9 +1557,10 @@ fn another_user_cannot_cancel_pending_stop_or_unlock_funds() {
     assert_eq!(alice_eth.available(), AssetAmount::new(0));
     assert_eq!(alice_eth.locked(), AssetAmount::new(40));
 
-    let cancelled = exchange
+    let cancellation = exchange
         .cancel_order(alice, &pair, OrderId::new(1))
         .unwrap();
+    let cancelled = cancellation.cancelled_order();
     assert!(matches!(cancelled, CancelledOrder::PendingStop(_)));
 
     let alice_eth_after = exchange.ledger().balance(alice, &eth);
@@ -1610,7 +1619,8 @@ fn stop_limit_insufficient_funds_rolls_back_market_and_order_id() {
             limit_price,
             Quantity::new(40),
         )
-        .unwrap();
+        .unwrap()
+        .order_id();
     assert_eq!(order_id, OrderId::new(1));
 }
 
@@ -1645,7 +1655,8 @@ fn buy_stop_limit_locks_quote_and_remains_pending() {
 
     let order_id = exchange
         .place_stop_limit_order(alice, &pair, Side::Buy, stop_price, limit_price, quantity)
-        .unwrap();
+        .unwrap()
+        .order_id();
 
     assert_eq!(order_id, OrderId::new(1));
 
@@ -1708,7 +1719,8 @@ fn triggered_buy_stop_settles_trade_and_refunds_price_improvement() {
             Price::new(115).unwrap(),
             Quantity::new(2),
         )
-        .unwrap();
+        .unwrap()
+        .order_id();
 
     assert_eq!(alice_order_id, OrderId::new(1));
 
@@ -1849,7 +1861,8 @@ fn cancelling_pending_buy_stop_unlocks_full_quote_amount() {
 
     let order_id = exchange
         .place_stop_limit_order(alice, &pair, Side::Buy, stop_price, limit_price, quantity)
-        .unwrap();
+        .unwrap()
+        .order_id();
 
     assert_eq!(order_id, OrderId::new(1));
 
@@ -1857,7 +1870,8 @@ fn cancelling_pending_buy_stop_unlocks_full_quote_amount() {
     assert_eq!(alice_usdc_before.available(), AssetAmount::new(0));
     assert_eq!(alice_usdc_before.locked(), AssetAmount::new(230));
 
-    let cancelled = exchange.cancel_order(alice, &pair, order_id).unwrap();
+    let cancellation = exchange.cancel_order(alice, &pair, order_id).unwrap();
+    let cancelled = cancellation.cancelled_order();
 
     assert!(matches!(&cancelled, CancelledOrder::PendingStop(_)));
     assert_eq!(cancelled.id(), order_id);

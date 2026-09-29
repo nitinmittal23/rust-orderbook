@@ -20,6 +20,19 @@ pub struct SequenceNumber(u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AssetAmount(u128);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TradeSequenceNumber(u64);
+
+impl TradeSequenceNumber {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn value(self) -> u64 {
+        self.0
+    }
+}
+
 impl Price {
     pub fn new(price: u128) -> Result<Self, PriceError> {
         if price == 0 {

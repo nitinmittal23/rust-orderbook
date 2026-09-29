@@ -12,6 +12,7 @@ pub enum AssetError {
     UnsupportedDecimals,
 }
 
+#[derive(Clone)]
 pub struct Asset {
     symbol: AssetSymbol,
     decimals: u8,

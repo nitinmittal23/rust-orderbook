@@ -1,17 +1,20 @@
-mod bootstrap;
-
-use orderbook::api::{self, AppState};
+use orderbook::{
+    api::{self, AppState},
+    application::loader::load_exchange,
+    persistence::postgres::create_pool,
+};
 
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-
-    let exchange = bootstrap::create_development_exchange();
-
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let db = orderbook::persistence::postgres::create_pool(&database_url)
+
+    let db = create_pool(&database_url)
         .await
         .expect("failed to connect to PostgreSQL");
+    let exchange = load_exchange(&db)
+        .await
+        .expect("failed to restore exchange");
 
     let state = AppState::new(exchange, db);
     let app = api::router(state);

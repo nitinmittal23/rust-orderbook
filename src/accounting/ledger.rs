@@ -54,6 +54,7 @@ pub enum LedgerError {
     InsufficientLocked,
     Overflow,
     EmptyMovement,
+    BalanceAlreadyRestored,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -144,6 +145,24 @@ impl Balance {
 impl Ledger {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn restore_balance(
+        &mut self,
+        user_id: UserId,
+        asset: AssetSymbol,
+        available: AssetAmount,
+        locked: AssetAmount,
+    ) -> Result<(), LedgerError> {
+        let user_balances = self.balances.entry(user_id).or_default();
+
+        if user_balances.contains_key(&asset) {
+            return Err(LedgerError::BalanceAlreadyRestored);
+        }
+
+        user_balances.insert(asset, Balance { available, locked });
+
+        Ok(())
     }
 
     pub fn balance(&self, user_id: UserId, asset: &AssetSymbol) -> Balance {

@@ -36,3 +36,16 @@ pub async fn upsert(
     .fetch_one(connection)
     .await
 }
+
+pub async fn list_all(connection: &mut PgConnection) -> Result<Vec<BalanceRecord>, sqlx::Error> {
+    sqlx::query_as::<_, BalanceRecord>(
+        r#"
+        SELECT
+            user_id, asset_id, available_atomic, locked_atomic
+        FROM balances
+        ORDER BY user_id ASC, asset_id ASC
+        "#,
+    )
+    .fetch_all(connection)
+    .await
+}

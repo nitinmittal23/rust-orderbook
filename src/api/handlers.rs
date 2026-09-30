@@ -160,31 +160,35 @@ pub async fn place_limit_order(
 
     let side = parse_side(&request.side)?;
 
-    let mut exchange = state.exchange.lock().await;
+    let (base_decimals, quote_decimals) = {
+        let exchange = state.exchange.lock().await;
 
-    if exchange.market(&pair).is_none() {
-        return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
-    }
+        if exchange.market(&pair).is_none() {
+            return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
+        }
 
-    let base_decimals = exchange
-        .asset(pair.base())
-        .ok_or_else(|| {
-            ApiError::internal(
-                "ASSET_CONFIGURATION_ERROR",
-                "base asset configuration is unavailable",
-            )
-        })?
-        .decimals();
+        let base_decimals = exchange
+            .asset(pair.base())
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "ASSET_CONFIGURATION_ERROR",
+                    "base asset configuration is unavailable",
+                )
+            })?
+            .decimals();
 
-    let quote_decimals = exchange
-        .asset(pair.quote())
-        .ok_or_else(|| {
-            ApiError::internal(
-                "ASSET_CONFIGURATION_ERROR",
-                "quote asset configuration is unavailable",
-            )
-        })?
-        .decimals();
+        let quote_decimals = exchange
+            .asset(pair.quote())
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "ASSET_CONFIGURATION_ERROR",
+                    "quote asset configuration is unavailable",
+                )
+            })?
+            .decimals();
+
+        (base_decimals, quote_decimals)
+    };
 
     let quantity_atomic = parse_decimal(&request.quantity, base_decimals).map_err(|_| {
         ApiError::bad_request("INVALID_QUANTITY", "quantity has an invalid decimal")
@@ -198,9 +202,18 @@ pub async fn place_limit_order(
     let price = Price::new(price_atomic)
         .map_err(|_| ApiError::bad_request("INVALID_PRICE", "price must be greater than zero"))?;
 
-    let result = exchange.place_limit_order(user_id, &pair, side, price, quantity)?;
-
-    drop(exchange);
+    let result = state
+        .trading_service
+        .place_limit_order(
+            client_order_id.clone(),
+            user_id,
+            pair,
+            side,
+            quantity,
+            price,
+        )
+        .await
+        .map_err(ApiError::from)?;
 
     let trades = result
         .trades()

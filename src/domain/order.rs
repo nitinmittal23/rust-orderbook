@@ -45,6 +45,9 @@ pub struct Order {
 pub enum OrderError {
     ZeroQuantity,
     ExceedsRemaining,
+    ZeroRemainingQuantity,
+    RemainingExceedsOriginal,
+    ZeroSequence,
 }
 
 impl Side {
@@ -186,6 +189,42 @@ impl Order {
             self.remaining_quantity(),
             Some(self.sequence()),
         )
+    }
+
+    pub(crate) fn restore_active(
+        id: OrderId,
+        user_id: UserId,
+        side: Side,
+        kind: OrderKind,
+        original_quantity: Quantity,
+        remaining_quantity: Quantity,
+        sequence: SequenceNumber,
+    ) -> Result<Self, OrderError> {
+        if original_quantity.is_zero() {
+            return Err(OrderError::ZeroQuantity);
+        }
+
+        if remaining_quantity.is_zero() {
+            return Err(OrderError::ZeroRemainingQuantity);
+        }
+
+        if remaining_quantity > original_quantity {
+            return Err(OrderError::RemainingExceedsOriginal);
+        }
+
+        if sequence.value() == 0 {
+            return Err(OrderError::ZeroSequence);
+        }
+
+        Ok(Self {
+            id,
+            user_id,
+            side,
+            kind,
+            original_quantity,
+            remaining_quantity,
+            sequence,
+        })
     }
 }
 

@@ -11,7 +11,7 @@ struct PriceLevel {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum PriceLevelError {
+pub(crate) enum PriceLevelError {
     PriceMismatch,
     MarketOrderCannotRest,
 }
@@ -121,6 +121,10 @@ impl OrderBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn restore_resting_order(&mut self, order: Order) -> Result<(), PriceLevelError> {
+        self.add_resting_order(order)
     }
 
     fn add_resting_order(&mut self, order: Order) -> Result<(), PriceLevelError> {

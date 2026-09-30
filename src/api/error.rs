@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::{
     accounting::ledger::LedgerError,
+    application::trading::TradingServiceError,
     exchange::ExchangeError,
     matching::{book::CancelError, market::MarketOrderError},
 };
@@ -115,6 +116,45 @@ impl From<ExchangeError> for ApiError {
             ),
 
             _ => Self::internal("EXCHANGE_ERROR", "exchange could not process the request"),
+        }
+    }
+}
+
+impl From<TradingServiceError> for ApiError {
+    fn from(error: TradingServiceError) -> Self {
+        match error {
+            TradingServiceError::Exchange(error) => Self::from(error),
+
+            TradingServiceError::UnknownUser => Self::not_found("USER_NOT_FOUND", "user not found"),
+
+            TradingServiceError::UserDisabled => {
+                Self::forbidden("USER_DISABLED", "user is disabled")
+            }
+
+            TradingServiceError::UnknownBaseAsset | TradingServiceError::UnknownQuoteAsset => {
+                Self::not_found("ASSET_NOT_FOUND", "asset not found")
+            }
+
+            TradingServiceError::BaseAssetDisabled | TradingServiceError::QuoteAssetDisabled => {
+                Self::bad_request("ASSET_DISABLED", "asset is disabled")
+            }
+
+            TradingServiceError::UnknownMarket => {
+                Self::not_found("MARKET_NOT_FOUND", "market not found")
+            }
+
+            TradingServiceError::MarketDisabled => {
+                Self::bad_request("MARKET_DISABLED", "market is disabled")
+            }
+
+            TradingServiceError::Database(_) => {
+                Self::internal("DATABASE_ERROR", "database operation failed")
+            }
+
+            TradingServiceError::IdentifierOutOfRange
+            | TradingServiceError::UnexpectedEngineOutput => {
+                Self::internal("TRADING_SERVICE_ERROR", "order could not be processed")
+            }
         }
     }
 }

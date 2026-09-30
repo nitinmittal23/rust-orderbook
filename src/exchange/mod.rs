@@ -3,16 +3,19 @@ use crate::accounting::ledger::{
 };
 use crate::domain::{
     asset::{Asset, AssetSymbol},
-    order::{OrderStateChange, OrderStatus, Side},
+    order::{Order, OrderStateChange, OrderStatus, Side},
     pair::TradingPair,
-    primitives::{AssetAmount, OrderId, Price, Quantity, UserId},
+    primitives::{
+        AssetAmount, OrderId, Price, Quantity, SequenceNumber, TradeSequenceNumber, UserId,
+    },
+    stop_order::StopLimitOrder,
     trade::Trade,
 };
 use crate::matching::{
     book::{CancelError, PlacementResult},
     market::{
-        CancelledOrder, Market, MarketCreationError, MarketOrderError, MarketSnapshot,
-        QuoteAmountError,
+        CancelledOrder, Market, MarketCreationError, MarketOrderError, MarketRestoreError,
+        MarketSnapshot, QuoteAmountError,
     },
 };
 
@@ -58,6 +61,13 @@ impl MarketOrderRequest {
             Self::Buy { quantity, .. } | Self::Sell { quantity } => quantity,
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExchangeRestoreError {
+    Exchange(ExchangeError),
+    Market(MarketRestoreError),
+    ZeroNextOrderId,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -744,6 +754,107 @@ impl Exchange {
             balance_movements,
             balance_snapshots,
         })
+    }
+
+    pub(crate) fn restore_market(
+        &mut self,
+        pair: TradingPair,
+        price_tick: Price,
+        quantity_step: Quantity,
+        last_trade_price: Option<Price>,
+        next_order_sequence: SequenceNumber,
+        next_trade_sequence: TradeSequenceNumber,
+    ) -> Result<(), ExchangeRestoreError> {
+        if self.markets.contains_key(&pair) {
+            return Err(ExchangeRestoreError::Exchange(
+                ExchangeError::MarketAlreadyExists,
+            ));
+        }
+
+        let base_asset = self
+            .assets
+            .get(pair.base())
+            .ok_or(ExchangeRestoreError::Exchange(
+                ExchangeError::UnknownBaseAsset,
+            ))?;
+        if !self.assets.contains_key(pair.quote()) {
+            return Err(ExchangeRestoreError::Exchange(
+                ExchangeError::UnknownQuoteAsset,
+            ));
+        }
+
+        let market = Market::restore(
+            pair.clone(),
+            base_asset,
+            price_tick,
+            quantity_step,
+            last_trade_price,
+            next_order_sequence,
+            next_trade_sequence,
+        )
+        .map_err(ExchangeRestoreError::Market)?;
+
+        self.markets.insert(pair, market);
+
+        Ok(())
+    }
+
+    pub(crate) fn restore_balance(
+        &mut self,
+        user_id: UserId,
+        asset: &AssetSymbol,
+        available: AssetAmount,
+        locked: AssetAmount,
+    ) -> Result<(), ExchangeRestoreError> {
+        if !self.assets.contains_key(asset) {
+            return Err(ExchangeRestoreError::Exchange(ExchangeError::UnknownAsset));
+        }
+
+        self.ledger
+            .restore_balance(user_id, asset.clone(), available, locked)
+            .map_err(|error| ExchangeRestoreError::Exchange(ExchangeError::Ledger(error)))
+    }
+
+    pub(crate) fn restore_active_order(
+        &mut self,
+        pair: &TradingPair,
+        order: Order,
+    ) -> Result<(), ExchangeRestoreError> {
+        let market = self
+            .markets
+            .get_mut(pair)
+            .ok_or(ExchangeRestoreError::Exchange(ExchangeError::UnknownMarket))?;
+
+        market
+            .restore_active_order(order)
+            .map_err(ExchangeRestoreError::Market)
+    }
+
+    pub(crate) fn restore_pending_stop(
+        &mut self,
+        pair: &TradingPair,
+        order: StopLimitOrder,
+    ) -> Result<(), ExchangeRestoreError> {
+        let market = self
+            .markets
+            .get_mut(pair)
+            .ok_or(ExchangeRestoreError::Exchange(ExchangeError::UnknownMarket))?;
+
+        market
+            .restore_pending_stop(order)
+            .map_err(ExchangeRestoreError::Market)
+    }
+
+    pub(crate) fn restore_next_order_id(
+        &mut self,
+        next_order_id: u64,
+    ) -> Result<(), ExchangeRestoreError> {
+        if next_order_id == 0 {
+            return Err(ExchangeRestoreError::ZeroNextOrderId);
+        }
+
+        self.next_order_id = next_order_id;
+        Ok(())
     }
 }
 

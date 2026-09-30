@@ -9,7 +9,7 @@ use crate::{
         stop_order::{StopLimitOrder, StopOrderError},
     },
     matching::{
-        book::{CancelError, OrderBook, PlacementResult},
+        book::{CancelError, OrderBook, PlacementResult, PriceLevelError},
         stop_book::StopOrderBook,
     },
 };
@@ -20,6 +20,15 @@ pub struct MarketSnapshot {
     last_trade_price: Option<Price>,
     next_order_sequence: SequenceNumber,
     next_trade_sequence: TradeSequenceNumber,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MarketRestoreError {
+    Creation(MarketCreationError),
+    ZeroNextOrderSequence,
+    ZeroNextTradeSequence,
+    InvalidRestingOrder(PriceLevelError),
+    PendingStopAlreadyTriggered,
 }
 
 impl MarketSnapshot {
@@ -177,6 +186,52 @@ impl Market {
             next_sequence_number: 1,
             next_trade_sequence_number: 1,
         })
+    }
+
+    pub(crate) fn restore(
+        pair: TradingPair,
+        base_asset: &Asset,
+        price_tick: Price,
+        quantity_step: Quantity,
+        last_trade_price: Option<Price>,
+        next_order_sequence: SequenceNumber,
+        next_trade_sequence: TradeSequenceNumber,
+    ) -> Result<Self, MarketRestoreError> {
+        if next_order_sequence.value() == 0 {
+            return Err(MarketRestoreError::ZeroNextOrderSequence);
+        }
+
+        if next_trade_sequence.value() == 0 {
+            return Err(MarketRestoreError::ZeroNextTradeSequence);
+        }
+
+        let mut market = Self::new(pair, base_asset, price_tick, quantity_step)
+            .map_err(MarketRestoreError::Creation)?;
+
+        market.last_trade_price = last_trade_price;
+        market.next_sequence_number = next_order_sequence.value();
+        market.next_trade_sequence_number = next_trade_sequence.value();
+
+        Ok(market)
+    }
+
+    pub(crate) fn restore_active_order(&mut self, order: Order) -> Result<(), MarketRestoreError> {
+        self.order_book
+            .restore_resting_order(order)
+            .map_err(MarketRestoreError::InvalidRestingOrder)
+    }
+
+    pub(crate) fn restore_pending_stop(
+        &mut self,
+        order: StopLimitOrder,
+    ) -> Result<(), MarketRestoreError> {
+        if let Some(last_trade_price) = self.last_trade_price {
+            if order.is_triggered_by(last_trade_price) {
+                return Err(MarketRestoreError::PendingStopAlreadyTriggered);
+            }
+        }
+        self.stop_order_book.add(order);
+        Ok(())
     }
 
     pub fn pair(&self) -> &TradingPair {

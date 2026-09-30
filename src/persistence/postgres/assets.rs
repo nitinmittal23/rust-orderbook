@@ -45,3 +45,15 @@ pub async fn insert(
     .fetch_one(connection)
     .await
 }
+
+pub async fn list_all(connection: &mut PgConnection) -> Result<Vec<AssetRecord>, sqlx::Error> {
+    sqlx::query_as::<_, AssetRecord>(
+        r#"
+        SELECT id, symbol, name, decimals, enabled
+        FROM assets
+        ORDER BY id ASC
+        "#,
+    )
+    .fetch_all(connection)
+    .await
+}

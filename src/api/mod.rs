@@ -25,5 +25,12 @@ pub fn router(state: AppState) -> Router {
             "/markets/{base}/{quote}/orders/{order_id}",
             delete(handlers::cancel_limit_order),
         )
+        .route("/admin/assets", post(handlers::create_asset))
+        .route("/admin/markets", post(handlers::create_market))
+        .route("/users", post(handlers::create_user))
+        .route(
+            "/admin/users/{user_id}/deposits",
+            post(handlers::deposit_asset),
+        )
         .with_state(state)
 }

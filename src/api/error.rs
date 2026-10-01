@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::{
     accounting::ledger::LedgerError,
-    application::trading::TradingServiceError,
+    application::{admin::AdminServiceError, trading::TradingServiceError, user::UserServiceError},
     exchange::ExchangeError,
     matching::{book::CancelError, market::MarketOrderError},
 };
@@ -60,6 +60,14 @@ impl ApiError {
     pub fn forbidden(code: &str, message: &str) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
+            code: code.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    pub fn conflict(code: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             code: code.to_string(),
             message: message.to_string(),
         }
@@ -154,6 +162,103 @@ impl From<TradingServiceError> for ApiError {
             TradingServiceError::IdentifierOutOfRange
             | TradingServiceError::UnexpectedEngineOutput => {
                 Self::internal("TRADING_SERVICE_ERROR", "order could not be processed")
+            }
+        }
+    }
+}
+
+impl From<AdminServiceError> for ApiError {
+    fn from(error: AdminServiceError) -> Self {
+        match error {
+            AdminServiceError::InvalidAssetName => {
+                Self::bad_request("INVALID_ASSET_NAME", "asset name cannot be empty")
+            }
+
+            AdminServiceError::Exchange(ExchangeError::AssetAlreadyRegistered) => {
+                Self::conflict("ASSET_ALREADY_EXISTS", "asset already exists")
+            }
+
+            AdminServiceError::Database(_) => {
+                Self::internal("DATABASE_ERROR", "database operation failed")
+            }
+
+            AdminServiceError::UnknownBaseAsset => {
+                Self::not_found("BASE_ASSET_NOT_FOUND", "base asset not found")
+            }
+
+            AdminServiceError::UnknownQuoteAsset => {
+                Self::not_found("QUOTE_ASSET_NOT_FOUND", "quote asset not found")
+            }
+
+            AdminServiceError::BaseAssetDisabled => {
+                Self::bad_request("BASE_ASSET_DISABLED", "base asset is disabled")
+            }
+
+            AdminServiceError::QuoteAssetDisabled => {
+                Self::bad_request("QUOTE_ASSET_DISABLED", "quote asset is disabled")
+            }
+
+            AdminServiceError::Exchange(ExchangeError::MarketAlreadyExists) => {
+                Self::conflict("MARKET_ALREADY_EXISTS", "market already exists")
+            }
+
+            AdminServiceError::Exchange(ExchangeError::MarketCreation(_)) => Self::bad_request(
+                "INVALID_MARKET_CONFIGURATION",
+                "price tick and quantity step are incompatible",
+            ),
+
+            AdminServiceError::Exchange(error) => Self::from(error),
+
+            AdminServiceError::InvalidDepositReference => Self::bad_request(
+                "INVALID_DEPOSIT_REFERENCE",
+                "deposit reference cannot be empty",
+            ),
+
+            AdminServiceError::DepositReferenceConflict => Self::conflict(
+                "DEPOSIT_REFERENCE_CONFLICT",
+                "deposit reference was already used for different deposit details",
+            ),
+
+            AdminServiceError::UnknownUser => Self::not_found("USER_NOT_FOUND", "user not found"),
+
+            AdminServiceError::UserDisabled => Self::forbidden("USER_DISABLED", "user is disabled"),
+
+            AdminServiceError::UnknownAsset => {
+                Self::not_found("ASSET_NOT_FOUND", "asset not found")
+            }
+
+            AdminServiceError::AssetDisabled => {
+                Self::bad_request("ASSET_DISABLED", "asset is disabled")
+            }
+
+            AdminServiceError::IdentifierOutOfRange => {
+                Self::bad_request("INVALID_IDENTIFIER", "identifier is out of range")
+            }
+
+            AdminServiceError::UnexpectedEngineOutput => Self::internal(
+                "ADMIN_SERVICE_ERROR",
+                "admin operation produced an unexpected result",
+            ),
+        }
+    }
+}
+
+impl From<UserServiceError> for ApiError {
+    fn from(error: UserServiceError) -> Self {
+        match error {
+            UserServiceError::InvalidDisplayName => {
+                Self::bad_request("INVALID_DISPLAY_NAME", "invalid display name")
+            }
+
+            UserServiceError::InvalidEmail => Self::bad_request("INVALID_EMAIL", "invalid email"),
+
+            UserServiceError::EmailAlreadyExists => Self::conflict(
+                "EMAIL_ALREADY_EXISTS",
+                "a user with this email already exists",
+            ),
+
+            UserServiceError::Database(_) => {
+                Self::internal("DATABASE_ERROR", "database operation failed")
             }
         }
     }

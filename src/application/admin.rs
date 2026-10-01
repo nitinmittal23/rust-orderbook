@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, types::BigDecimal};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -10,13 +10,14 @@ use crate::{
         pair::TradingPair,
         primitives::{AssetAmount, Price, Quantity, UserId},
     },
-    exchange::{BalanceOperationResult, Exchange, ExchangeError},
+    exchange::{Exchange, ExchangeError},
     persistence::postgres::{
         assets::{self, AssetRecord},
         balance_movements::{self, BalanceMovementInsert},
         balances,
+        deposits::{self, DepositInsert, DepositRecord},
         markets::{self, MarketRecord},
-        users::{self, UserRecord},
+        users,
     },
 };
 
@@ -36,14 +37,15 @@ pub enum AdminServiceError {
     UnknownQuoteAsset,
     BaseAssetDisabled,
     QuoteAssetDisabled,
-    InvalidDisplayName,
-    InvalidEmail,
     UnknownUser,
     UserDisabled,
     UnknownAsset,
     AssetDisabled,
     IdentifierOutOfRange,
     UnexpectedEngineOutput,
+    InvalidAssetName,
+    InvalidDepositReference,
+    DepositReferenceConflict,
 }
 
 impl AdminService {
@@ -56,6 +58,11 @@ impl AdminService {
         asset: Asset,
         name: &str,
     ) -> Result<AssetRecord, AdminServiceError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AdminServiceError::InvalidAssetName);
+        }
+
         let mut live_exchange = self.exchange.lock().await;
         let mut staged_exchange = live_exchange.clone();
 
@@ -132,43 +139,19 @@ impl AdminService {
         Ok(record)
     }
 
-    pub async fn create_user(
-        &self,
-        display_name: &str,
-        email: &str,
-    ) -> Result<UserRecord, AdminServiceError> {
-        let display_name = display_name.trim();
-
-        if display_name.is_empty() {
-            return Err(AdminServiceError::InvalidDisplayName);
-        }
-
-        let email = email.trim().to_ascii_lowercase();
-
-        if email.is_empty() {
-            return Err(AdminServiceError::InvalidEmail);
-        }
-
-        let mut transaction = self.db.begin().await.map_err(AdminServiceError::Database)?;
-
-        let record = users::insert(transaction.as_mut(), display_name, &email)
-            .await
-            .map_err(AdminServiceError::Database)?;
-
-        transaction
-            .commit()
-            .await
-            .map_err(AdminServiceError::Database)?;
-
-        Ok(record)
-    }
-
     pub async fn deposit(
         &self,
+        reference_id: &str,
         user_id: UserId,
         asset: &AssetSymbol,
         amount: AssetAmount,
-    ) -> Result<BalanceOperationResult, AdminServiceError> {
+    ) -> Result<DepositRecord, AdminServiceError> {
+        let reference_id = reference_id.trim();
+
+        if reference_id.is_empty() {
+            return Err(AdminServiceError::InvalidDepositReference);
+        }
+
         let database_user_id =
             i64::try_from(user_id.value()).map_err(|_| AdminServiceError::IdentifierOutOfRange)?;
         let mut live_exchange = self.exchange.lock().await;
@@ -191,6 +174,46 @@ impl AdminService {
             return Err(AdminServiceError::AssetDisabled);
         }
 
+        let operation_id = Uuid::new_v4();
+        let amount_atomic = BigDecimal::from(amount.value());
+
+        let deposit_insert = DepositInsert {
+            id: operation_id,
+            reference_id: reference_id.to_string(),
+            user_id: database_user_id,
+            asset_id: asset_record.id,
+            amount_atomic: amount_atomic.clone(),
+            status: "CREDITED".to_string(),
+        };
+
+        let deposit_record = match deposits::insert_if_absent(transaction.as_mut(), &deposit_insert)
+            .await
+            .map_err(AdminServiceError::Database)?
+        {
+            Some(record) => record,
+
+            None => {
+                let existing = deposits::find_by_reference(transaction.as_mut(), reference_id)
+                    .await
+                    .map_err(AdminServiceError::Database)?
+                    .ok_or(AdminServiceError::UnexpectedEngineOutput)?;
+
+                if existing.user_id != database_user_id
+                    || existing.asset_id != asset_record.id
+                    || existing.amount_atomic != amount_atomic
+                {
+                    return Err(AdminServiceError::DepositReferenceConflict);
+                }
+
+                transaction
+                    .commit()
+                    .await
+                    .map_err(AdminServiceError::Database)?;
+
+                return Ok(existing);
+            }
+        };
+
         let result = staged_exchange
             .deposit(user_id, asset, amount)
             .map_err(AdminServiceError::Exchange)?;
@@ -200,10 +223,8 @@ impl AdminService {
             .first()
             .ok_or(AdminServiceError::UnexpectedEngineOutput)?;
 
-        let operation_id = Uuid::new_v4();
-
         let movement_insert = BalanceMovementInsert {
-            operation_id,
+            operation_id: deposit_record.id,
             user_id: database_user_id,
             asset_id: asset_record.id,
             available_delta_atomic: delta_to_big_decimal(movement.available_delta()),
@@ -239,6 +260,6 @@ impl AdminService {
 
         *live_exchange = staged_exchange;
 
-        Ok(result)
+        Ok(deposit_record)
     }
 }

@@ -3,6 +3,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 pub mod assets;
 pub mod balance_movements;
 pub mod balances;
+pub mod deposits;
 pub mod markets;
 pub mod orders;
 pub mod trades;

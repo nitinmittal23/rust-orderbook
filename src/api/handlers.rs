@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        asset::AssetSymbol,
+        asset::{Asset, AssetSymbol},
         order::Side,
         pair::TradingPair,
         primitives::{AssetAmount, OrderId, Price, Quantity, UserId},
@@ -18,9 +18,11 @@ use crate::{
 use super::{
     decimal::{format_decimal, parse_decimal},
     dto::{
-        BalanceResponse, BookTickerResponse, CancelOrderResponse, OrderPlacementResponse,
-        PlaceLimitOrderRequest, PlaceMarketOrderRequest, PlaceStopLimitOrderRequest,
-        PlaceStopLimitOrderResponse, TradeResponse,
+        AssetResponse, BalanceResponse, BookTickerResponse, CancelOrderResponse,
+        CreateAssetRequest, CreateMarketRequest, CreateUserRequest, DepositAssetRequest,
+        DepositAssetResponse, MarketResponse, OrderPlacementResponse, PlaceLimitOrderRequest,
+        PlaceMarketOrderRequest, PlaceStopLimitOrderRequest, PlaceStopLimitOrderResponse,
+        TradeResponse, UserResponse,
     },
     error::ApiError,
     state::AppState,
@@ -562,4 +564,176 @@ pub async fn place_stop_limit_order(
     };
 
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+pub async fn create_asset(
+    State(state): State<AppState>,
+    Json(request): Json<CreateAssetRequest>,
+) -> Result<(StatusCode, Json<AssetResponse>), ApiError> {
+    let symbol = AssetSymbol::new(&request.symbol)
+        .map_err(|_| ApiError::bad_request("INVALID_ASSET_SYMBOL", "invalid asset symbol"))?;
+    let asset = Asset::new(symbol, request.decimals).map_err(|_| {
+        ApiError::bad_request(
+            "INVALID_ASSET_DECIMALS",
+            "asset decimal must be between 0 and 18",
+        )
+    })?;
+
+    let record = state
+        .admin_service
+        .create_asset(asset, &request.name)
+        .await
+        .map_err(ApiError::from)?;
+
+    let decimals = u8::try_from(record.decimals).map_err(|_| {
+        ApiError::internal("INVALID_STORED_ASSET", "stored asset decimals are invalid")
+    })?;
+
+    let response = AssetResponse {
+        id: record.id,
+        symbol: record.symbol,
+        name: record.name,
+        decimals,
+        enabled: record.enabled,
+    };
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+pub async fn create_market(
+    State(state): State<AppState>,
+    Json(request): Json<CreateMarketRequest>,
+) -> Result<(StatusCode, Json<MarketResponse>), ApiError> {
+    let base_symbol = AssetSymbol::new(&request.base)
+        .map_err(|_| ApiError::bad_request("INVALID_BASE_SYMBOL", "invalid base symbol"))?;
+
+    let quote_symbol = AssetSymbol::new(&request.quote)
+        .map_err(|_| ApiError::bad_request("INVALID_QUOTE_SYMBOL", "invalid quote symbol"))?;
+
+    let pair = TradingPair::new(base_symbol, quote_symbol)
+        .map_err(|_| ApiError::bad_request("INVALID_TRADING_PAIR", "invalid trading pair"))?;
+
+    let (base_decimals, quote_decimals) = {
+        let exchange = state.exchange.lock().await;
+
+        let base_decimals = exchange
+            .asset(pair.base())
+            .ok_or_else(|| ApiError::not_found("BASE_ASSET_NOT_FOUND", "base asset not found"))?
+            .decimals();
+
+        let quote_decimals = exchange
+            .asset(pair.quote())
+            .ok_or_else(|| ApiError::not_found("QUOTE_ASSET_NOT_FOUND", "quote asset not found"))?
+            .decimals();
+
+        (base_decimals, quote_decimals)
+    };
+
+    let price_tick_atomic = parse_decimal(&request.price_tick, quote_decimals)
+        .map_err(|_| ApiError::bad_request("INVALID_PRICE_TICK", "invalid price tick"))?;
+
+    let quantity_step_atomic = parse_decimal(&request.quantity_step, base_decimals)
+        .map_err(|_| ApiError::bad_request("INVALID_QUANTITY_STEP", "invalid quantity step"))?;
+
+    let price_tick = Price::new(price_tick_atomic).map_err(|_| {
+        ApiError::bad_request("INVALID_PRICE_TICK", "price tick must be greater than zero")
+    })?;
+
+    let quantity_step = Quantity::new(quantity_step_atomic);
+
+    if quantity_step.is_zero() {
+        return Err(ApiError::bad_request(
+            "INVALID_QUANTITY_STEP",
+            "quantity step must be greater than zero",
+        ));
+    }
+
+    let record = state
+        .admin_service
+        .create_market(pair.clone(), price_tick, quantity_step)
+        .await
+        .map_err(ApiError::from)?;
+
+    let response = MarketResponse {
+        id: record.id,
+        base: pair.base().as_str().to_string(),
+        quote: pair.quote().as_str().to_string(),
+        price_tick: format_response_decimal(price_tick.value(), quote_decimals)?,
+        quantity_step: format_response_decimal(quantity_step.value(), base_decimals)?,
+        enabled: record.enabled,
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+pub async fn create_user(
+    State(state): State<AppState>,
+    Json(request): Json<CreateUserRequest>,
+) -> Result<(StatusCode, Json<UserResponse>), ApiError> {
+    let record = state
+        .user_service
+        .create_user(&request.display_name, &request.email)
+        .await
+        .map_err(ApiError::from)?;
+
+    let response = UserResponse {
+        id: record.id,
+        display_name: record.display_name,
+        email: record.email,
+        enabled: record.enabled,
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+pub async fn deposit_asset(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Json(request): Json<DepositAssetRequest>,
+) -> Result<(StatusCode, Json<DepositAssetResponse>), ApiError> {
+    let user_id_value = user_id
+        .parse::<u64>()
+        .map_err(|_| ApiError::bad_request("INVALID_USER_ID", "invalid user ID"))?;
+
+    let user_id = UserId::new(user_id_value);
+
+    let asset_symbol = AssetSymbol::new(&request.asset)
+        .map_err(|_| ApiError::bad_request("INVALID_ASSET_SYMBOL", "invalid asset symbol"))?;
+
+    let asset_decimals = {
+        let exchange = state.exchange.lock().await;
+
+        exchange
+            .asset(&asset_symbol)
+            .ok_or_else(|| ApiError::not_found("ASSET_NOT_FOUND", "asset not found"))?
+            .decimals()
+    };
+
+    let amount_atomic = parse_decimal(&request.amount, asset_decimals)
+        .map_err(|_| ApiError::bad_request("INVALID_AMOUNT", "invalid deposit amount"))?;
+
+    if amount_atomic == 0 {
+        return Err(ApiError::bad_request(
+            "INVALID_AMOUNT",
+            "deposit amount must be greater than zero",
+        ));
+    }
+
+    let amount = AssetAmount::new(amount_atomic);
+
+    let record = state
+        .admin_service
+        .deposit(&request.reference_id, user_id, &asset_symbol, amount)
+        .await
+        .map_err(ApiError::from)?;
+
+    let response = DepositAssetResponse {
+        id: record.id.to_string(),
+        reference_id: record.reference_id,
+        user_id: record.user_id,
+        asset: asset_symbol.as_str().to_string(),
+        amount: format_response_decimal(amount.value(), asset_decimals)?,
+        status: record.status,
+    };
+
+    Ok((StatusCode::OK, Json(response)))
 }

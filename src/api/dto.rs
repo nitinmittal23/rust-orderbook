@@ -90,3 +90,68 @@ pub struct PlaceStopLimitOrderResponse {
     pub order_id: String,
     pub client_order_id: String,
 }
+
+#[derive(Deserialize)]
+pub struct CreateAssetRequest {
+    pub symbol: String,
+    pub decimals: u8,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct AssetResponse {
+    pub id: i64,
+    pub symbol: String,
+    pub decimals: u8,
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct CreateMarketRequest {
+    pub base: String,
+    pub quote: String,
+    pub price_tick: String,
+    pub quantity_step: String,
+}
+
+#[derive(Serialize)]
+pub struct MarketResponse {
+    pub id: i64,
+    pub base: String,
+    pub quote: String,
+    pub price_tick: String,
+    pub quantity_step: String,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct CreateUserRequest {
+    pub display_name: String,
+    pub email: String,
+}
+
+#[derive(Serialize)]
+pub struct UserResponse {
+    pub id: i64,
+    pub display_name: String,
+    pub email: String,
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct DepositAssetRequest {
+    pub asset: String,
+    pub amount: String,
+    pub reference_id: String,
+}
+
+#[derive(Serialize)]
+pub struct DepositAssetResponse {
+    pub id: String,
+    pub reference_id: String,
+    pub user_id: i64,
+    pub asset: String,
+    pub amount: String,
+    pub status: String,
+}

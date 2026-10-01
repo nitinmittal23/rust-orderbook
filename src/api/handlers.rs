@@ -300,33 +300,41 @@ pub async fn cancel_limit_order(
         .map_err(|_| ApiError::bad_request("INVALID_ORDER_ID", "invalid order id"))?;
     let order_id = OrderId::new(order_id_value);
 
-    let mut exchange = state.exchange.lock().await;
+    let (base_decimals, quote_decimals) = {
+        let exchange = state.exchange.lock().await;
 
-    if exchange.market(&pair).is_none() {
-        return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
-    }
+        if exchange.market(&pair).is_none() {
+            return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
+        }
 
-    let quote_decimals = exchange
-        .asset(pair.quote())
-        .ok_or_else(|| {
-            ApiError::internal(
-                "ASSET_CONFIGURATION_ERROR",
-                "quote asset configuration is unavailable",
-            )
-        })?
-        .decimals();
+        let base_decimals = exchange
+            .asset(pair.base())
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "ASSET_CONFIGURATION_ERROR",
+                    "base asset configuration is unavailable",
+                )
+            })?
+            .decimals();
 
-    let base_decimals = exchange
-        .asset(pair.base())
-        .ok_or_else(|| {
-            ApiError::internal(
-                "ASSET_CONFIGURATION_ERROR",
-                "base asset configuration is unavailable",
-            )
-        })?
-        .decimals();
+        let quote_decimals = exchange
+            .asset(pair.quote())
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "ASSET_CONFIGURATION_ERROR",
+                    "quote asset configuration is unavailable",
+                )
+            })?
+            .decimals();
 
-    let result = exchange.cancel_order(user_id, &pair, order_id)?;
+        (base_decimals, quote_decimals)
+    };
+
+    let result = state
+        .trading_service
+        .cancel_order(user_id, pair, order_id)
+        .await
+        .map_err(ApiError::from)?;
     let cancelled_order = result.cancelled_order();
 
     let price = cancelled_order.limit_price().ok_or_else(|| {
@@ -335,7 +343,6 @@ pub async fn cancel_limit_order(
             "cancelled limit order has no price",
         )
     })?;
-    drop(exchange);
 
     let response = CancelOrderResponse {
         order_id: cancelled_order.id().value().to_string(),
@@ -387,31 +394,35 @@ pub async fn place_market_order(
     let pair = TradingPair::new(base_symbol, quote_symbol)
         .map_err(|_| ApiError::bad_request("INVALID_TRADING_PAIR", "invalid trading pair"))?;
 
-    let mut exchange = state.exchange.lock().await;
+    let (base_decimals, quote_decimals) = {
+        let exchange = state.exchange.lock().await;
 
-    if exchange.market(&pair).is_none() {
-        return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
-    }
+        if exchange.market(&pair).is_none() {
+            return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
+        }
 
-    let base_decimals = exchange
-        .asset(pair.base())
-        .ok_or_else(|| {
-            ApiError::internal(
-                "ASSET_CONFIGURATION_ERROR",
-                "base asset configuration is unavailable",
-            )
-        })?
-        .decimals();
+        let base_decimals = exchange
+            .asset(pair.base())
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "ASSET_CONFIGURATION_ERROR",
+                    "base asset configuration is unavailable",
+                )
+            })?
+            .decimals();
 
-    let quote_decimals = exchange
-        .asset(pair.quote())
-        .ok_or_else(|| {
-            ApiError::internal(
-                "ASSET_CONFIGURATION_ERROR",
-                "quote asset configuration is unavailable",
-            )
-        })?
-        .decimals();
+        let quote_decimals = exchange
+            .asset(pair.quote())
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "ASSET_CONFIGURATION_ERROR",
+                    "quote asset configuration is unavailable",
+                )
+            })?
+            .decimals();
+
+        (base_decimals, quote_decimals)
+    };
 
     let market_request = match request {
         PlaceMarketOrderRequest::Buy {
@@ -443,9 +454,11 @@ pub async fn place_market_order(
         }
     };
 
-    let result = exchange.place_market_order(user_id, &pair, market_request)?;
-
-    drop(exchange);
+    let result = state
+        .trading_service
+        .place_market_order(client_order_id.clone(), user_id, pair, market_request)
+        .await
+        .map_err(ApiError::from)?;
 
     let trades = result
         .trades()
@@ -498,31 +511,35 @@ pub async fn place_stop_limit_order(
 
     let side = parse_side(&request.side)?;
 
-    let mut exchange = state.exchange.lock().await;
+    let (base_decimals, quote_decimals) = {
+        let exchange = state.exchange.lock().await;
 
-    if exchange.market(&pair).is_none() {
-        return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
-    }
+        if exchange.market(&pair).is_none() {
+            return Err(ApiError::not_found("MARKET_NOT_FOUND", "market not found"));
+        }
 
-    let base_decimals = exchange
-        .asset(pair.base())
-        .ok_or_else(|| {
-            ApiError::internal(
-                "ASSET_CONFIGURATION_ERROR",
-                "base asset configuration is unavailable",
-            )
-        })?
-        .decimals();
+        let base_decimals = exchange
+            .asset(pair.base())
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "ASSET_CONFIGURATION_ERROR",
+                    "base asset configuration is unavailable",
+                )
+            })?
+            .decimals();
 
-    let quote_decimals = exchange
-        .asset(pair.quote())
-        .ok_or_else(|| {
-            ApiError::internal(
-                "ASSET_CONFIGURATION_ERROR",
-                "quote asset configuration is unavailable",
-            )
-        })?
-        .decimals();
+        let quote_decimals = exchange
+            .asset(pair.quote())
+            .ok_or_else(|| {
+                ApiError::internal(
+                    "ASSET_CONFIGURATION_ERROR",
+                    "quote asset configuration is unavailable",
+                )
+            })?
+            .decimals();
+
+        (base_decimals, quote_decimals)
+    };
 
     let quantity_atomic = parse_decimal(&request.quantity, base_decimals).map_err(|_| {
         ApiError::bad_request("INVALID_QUANTITY", "quantity has an invalid decimal")
@@ -553,10 +570,19 @@ pub async fn place_stop_limit_order(
         )
     })?;
 
-    let result =
-        exchange.place_stop_limit_order(user_id, &pair, side, stop_price, limit_price, quantity)?;
-
-    drop(exchange);
+    let result = state
+        .trading_service
+        .place_stop_limit_order(
+            client_order_id.clone(),
+            user_id,
+            pair,
+            side,
+            quantity,
+            stop_price,
+            limit_price,
+        )
+        .await
+        .map_err(ApiError::from)?;
 
     let response = PlaceStopLimitOrderResponse {
         order_id: result.order_id().value().to_string(),

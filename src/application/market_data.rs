@@ -14,6 +14,8 @@ use crate::{
     },
 };
 
+use crate::application::candle_interval::CandleInterval;
+
 #[derive(Clone)]
 pub struct MarketDataService {
     db: PgPool,
@@ -167,8 +169,9 @@ impl MarketDataService {
         Ok(RecentTradesResult { market, trades })
     }
 
-    fn aggregate_minute_candles(
+    fn aggregate_candles(
         records: &[TradeRecord],
+        interval: CandleInterval,
     ) -> Result<Vec<Candle>, MarketDataServiceError> {
         let mut candles: BTreeMap<i64, Candle> = BTreeMap::new();
 
@@ -192,24 +195,25 @@ impl MarketDataService {
 
             let quantity = Quantity::new(quantity_value);
 
-            let minute_timestamp = record.created_at.timestamp().div_euclid(60) * 60;
+            let bucket_timestamp = interval.bucket_start(record.created_at.timestamp());
 
-            let start_time = DateTime::<Utc>::from_timestamp(minute_timestamp, 0)
+            let start_time = DateTime::<Utc>::from_timestamp(bucket_timestamp, 0)
                 .ok_or(MarketDataServiceError::InvalidStoredTrade)?;
 
-            if let Some(candle) = candles.get_mut(&minute_timestamp) {
+            if let Some(candle) = candles.get_mut(&bucket_timestamp) {
                 candle.apply_trade(price, quantity)?;
             } else {
-                candles.insert(minute_timestamp, Candle::new(start_time, price, quantity));
+                candles.insert(bucket_timestamp, Candle::new(start_time, price, quantity));
             }
         }
 
         Ok(candles.into_values().collect())
     }
 
-    pub async fn minute_candles(
+    pub async fn candles(
         &self,
         pair: &TradingPair,
+        interval: CandleInterval,
         limit: u32,
     ) -> Result<CandlesResult, MarketDataServiceError> {
         if !(1..=100).contains(&limit) {
@@ -228,22 +232,33 @@ impl MarketDataService {
                 .map_err(MarketDataServiceError::Database)?
                 .ok_or(MarketDataServiceError::UnknownMarket)?;
 
-        let current_minute = Utc::now().timestamp().div_euclid(60) * 60;
+        let interval_seconds = interval.seconds();
+        let current_bucket =
+            interval.bucket_start(Utc::now().timestamp());
+        
+        let end_timestamp = current_bucket
+            .checked_add(interval_seconds)
+            .ok_or(MarketDataServiceError::InvalidCandleRange)?;
 
-        let end_timestamp = current_minute
-            .checked_add(60)
+        let range_seconds = interval_seconds
+            .checked_mul(i64::from(limit))
+            .ok_or(MarketDataServiceError::InvalidCandleRange)?;
+
+        let start_timestamp = end_timestamp
+            .checked_sub(range_seconds)
+            .ok_or(MarketDataServiceError::InvalidCandleRange)?;
+
+        let start = DateTime::<Utc>::from_timestamp(start_timestamp, 0)
             .ok_or(MarketDataServiceError::InvalidCandleRange)?;
 
         let end = DateTime::<Utc>::from_timestamp(end_timestamp, 0)
             .ok_or(MarketDataServiceError::InvalidCandleRange)?;
 
-        let start = end - chrono::Duration::minutes(i64::from(limit));
-
         let records = trades::list_between(connection.as_mut(), market.id, start, end)
             .await
             .map_err(MarketDataServiceError::Database)?;
 
-        let candles = Self::aggregate_minute_candles(&records)?;
+        let candles = Self::aggregate_candles(&records, interval)?;
 
         Ok(CandlesResult { market, candles })
     }

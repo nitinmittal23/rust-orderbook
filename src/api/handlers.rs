@@ -8,6 +8,7 @@ use sqlx::{FromRow, types::BigDecimal};
 use uuid::Uuid;
 
 use crate::{
+    application::candle_interval::CandleInterval,
     domain::{
         asset::{Asset, AssetSymbol},
         order::Side,
@@ -978,14 +979,15 @@ pub async fn get_candles(
     Path((base, quote)): Path<(String, String)>,
     Query(query): Query<CandlesQuery>,
 ) -> Result<Json<CandlesResponse>, ApiError> {
-    let interval = query.interval.unwrap_or_else(|| "1m".to_string());
+    let interval_text = query.interval.unwrap_or_else(|| "1m".to_string());
 
-    if interval != "1m" {
-        return Err(ApiError::bad_request(
-            "UNSUPPORTED_CANDLE_INTERVAL",
-            "only the 1m candle interval is currently supported",
-        ));
-    }
+    let interval = CandleInterval::try_from(interval_text.as_str())
+        .map_err(|_| {
+            ApiError::bad_request(
+                "UNSUPPORTED_CANDLE_INTERVAL",
+                "supported intervals are 1s, 1m, 3m, 5m, 15m, 30m, 1h, 4h, 6h, 12h, 1d, and 1w",
+            )
+        })?;
 
     let limit = query.limit.unwrap_or(100);
 
@@ -1000,7 +1002,7 @@ pub async fn get_candles(
 
     let result = state
         .market_data_service
-        .minute_candles(&pair, limit)
+        .candles(&pair, interval, limit)
         .await
         .map_err(ApiError::from)?;
 
@@ -1036,7 +1038,7 @@ pub async fn get_candles(
     Ok(Json(CandlesResponse {
         base: market.base_symbol,
         quote: market.quote_symbol,
-        interval,
+        interval: interval.as_str().to_string(),
         candles,
     }))
 }

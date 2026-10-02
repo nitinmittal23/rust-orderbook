@@ -236,3 +236,71 @@ pub struct CandlesResponse {
     pub interval: String,
     pub candles: Vec<CandleResponse>,
 }
+
+#[derive(Serialize)]
+pub struct OpenOrderResponse {
+    pub order_id: String,
+    pub side: String,
+    pub kind: String,
+    pub status: String,
+    pub remaining_quantity: String,
+    pub price: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct OpenOrdersResponse {
+    pub orders: Vec<OpenOrderResponse>,
+}
+
+#[derive(Serialize)]
+pub struct AccountOrderResponse {
+    pub order_id: String,
+    pub base: String,
+    pub quote: String,
+    pub side: String,
+    pub kind: String,
+    pub status: String,
+    pub original_quantity: String,
+    pub remaining_quantity: String,
+    pub price: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct AccountOrdersResponse {
+    pub orders: Vec<AccountOrderResponse>,
+}
+
+#[derive(Serialize)]
+pub struct AccountTradeResponse {
+    pub trade_id: String,
+    pub base: String,
+    pub quote: String,
+    pub side: String,
+    pub price: String,
+    pub quantity: String,
+    pub executed_at: String,
+}
+
+#[derive(Serialize)]
+pub struct AccountTradesResponse {
+    pub trades: Vec<AccountTradeResponse>,
+}
+
+#[derive(Serialize)]
+pub struct AccountBalancesResponse {
+    pub balances: Vec<BalanceResponse>,
+}
+
+#[derive(Serialize)]
+pub struct MarketStatsResponse {
+    pub base: String,
+    pub quote: String,
+    pub last_price: Option<String>,
+    pub open_24h: Option<String>,
+    pub high_24h: Option<String>,
+    pub low_24h: Option<String>,
+    pub volume_24h_base: String,
+    pub volume_24h_quote: String,
+}

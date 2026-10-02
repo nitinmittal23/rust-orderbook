@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use num_traits::ToPrimitive;
-use sqlx::types::BigDecimal;
+use sqlx::{FromRow, types::BigDecimal};
 use uuid::Uuid;
 
 use crate::{
@@ -20,13 +20,15 @@ use crate::{
 use super::{
     decimal::{format_decimal, parse_decimal},
     dto::{
-        AssetResponse, BalanceResponse, BookTickerResponse, CancelOrderResponse, CandleResponse,
-        CandlesQuery, CandlesResponse, CreateAssetRequest, CreateMarketRequest, CreateUserRequest,
-        DepositAssetRequest, DepositAssetResponse, DepthLevelResponse, MarketDepthQuery,
-        MarketDepthResponse, MarketResponse, MarketSummaryResponse, MarketsResponse,
-        OrderPlacementResponse, PlaceLimitOrderRequest, PlaceMarketOrderRequest,
-        PlaceStopLimitOrderRequest, PlaceStopLimitOrderResponse, RecentTradeResponse,
-        RecentTradesQuery, RecentTradesResponse, TradeResponse, UserResponse,
+        AccountBalancesResponse, AccountOrderResponse, AccountOrdersResponse, AccountTradeResponse,
+        AccountTradesResponse, AssetResponse, BalanceResponse, BookTickerResponse,
+        CancelOrderResponse, CandleResponse, CandlesQuery, CandlesResponse, CreateAssetRequest,
+        CreateMarketRequest, CreateUserRequest, DepositAssetRequest, DepositAssetResponse,
+        DepthLevelResponse, MarketDepthQuery, MarketDepthResponse, MarketResponse,
+        MarketStatsResponse, MarketSummaryResponse, MarketsResponse, OpenOrderResponse,
+        OpenOrdersResponse, OrderPlacementResponse, PlaceLimitOrderRequest,
+        PlaceMarketOrderRequest, PlaceStopLimitOrderRequest, PlaceStopLimitOrderResponse,
+        RecentTradeResponse, RecentTradesQuery, RecentTradesResponse, TradeResponse, UserResponse,
     },
     error::ApiError,
     state::AppState,
@@ -1036,5 +1038,336 @@ pub async fn get_candles(
         quote: market.quote_symbol,
         interval,
         candles,
+    }))
+}
+
+#[derive(FromRow)]
+struct OpenOrderRecord {
+    id: i64,
+    side: String,
+    kind: String,
+    status: String,
+    remaining_quantity_atomic: BigDecimal,
+    limit_price_atomic: BigDecimal,
+    base_decimals: i16,
+    quote_decimals: i16,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn open_orders(
+    State(state): State<AppState>,
+    Path((base, quote)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<OpenOrdersResponse>, ApiError> {
+    let user_id = user_id_from_header(&headers)?;
+    let user_id = i64::try_from(user_id.value())
+        .map_err(|_| ApiError::unauthorized("INVALID_USER_ID", "X-User-Id is invalid"))?;
+    let records = sqlx::query_as::<_, OpenOrderRecord>(
+        r#"
+        SELECT o.id, o.side, o.kind, o.status, o.remaining_quantity_atomic,
+               o.limit_price_atomic, b.decimals AS base_decimals,
+               q.decimals AS quote_decimals, o.created_at
+        FROM orders o
+        JOIN markets m ON m.id = o.market_id
+        JOIN assets b ON b.id = m.base_asset_id
+        JOIN assets q ON q.id = m.quote_asset_id
+        WHERE o.user_id = $1 AND b.symbol = $2 AND q.symbol = $3
+          AND o.status IN ('PENDING_TRIGGER', 'OPEN', 'PARTIALLY_FILLED')
+        ORDER BY o.created_at DESC, o.id DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(user_id)
+    .bind(base)
+    .bind(quote)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| ApiError::internal("ORDERS_UNAVAILABLE", "open orders could not be loaded"))?;
+
+    let mut orders = Vec::with_capacity(records.len());
+    for record in records {
+        let base_decimals = u8::try_from(record.base_decimals)
+            .map_err(|_| ApiError::internal("INVALID_STORED_ORDER", "invalid base precision"))?;
+        let quote_decimals = u8::try_from(record.quote_decimals)
+            .map_err(|_| ApiError::internal("INVALID_STORED_ORDER", "invalid quote precision"))?;
+        orders.push(OpenOrderResponse {
+            order_id: record.id.to_string(),
+            side: record.side.to_ascii_lowercase(),
+            kind: record.kind.to_ascii_lowercase().replace('_', "-"),
+            status: record.status.to_ascii_lowercase().replace('_', "-"),
+            remaining_quantity: format_response_decimal(
+                stored_atomic_to_u128(&record.remaining_quantity_atomic)?,
+                base_decimals,
+            )?,
+            price: format_response_decimal(
+                stored_atomic_to_u128(&record.limit_price_atomic)?,
+                quote_decimals,
+            )?,
+            created_at: record.created_at.to_rfc3339(),
+        });
+    }
+    Ok(Json(OpenOrdersResponse { orders }))
+}
+
+#[derive(FromRow)]
+struct AccountOrderRecord {
+    id: i64,
+    base: String,
+    quote: String,
+    side: String,
+    kind: String,
+    status: String,
+    original_quantity_atomic: BigDecimal,
+    remaining_quantity_atomic: BigDecimal,
+    limit_price_atomic: Option<BigDecimal>,
+    base_decimals: i16,
+    quote_decimals: i16,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn account_orders(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AccountOrdersResponse>, ApiError> {
+    let user_id = user_id_from_header(&headers)?;
+    let user_id = i64::try_from(user_id.value())
+        .map_err(|_| ApiError::unauthorized("INVALID_USER_ID", "X-User-Id is invalid"))?;
+    let records = sqlx::query_as::<_, AccountOrderRecord>(
+        r#"
+        SELECT o.id, b.symbol AS base, q.symbol AS quote, o.side, o.kind, o.status,
+               o.original_quantity_atomic, o.remaining_quantity_atomic, o.limit_price_atomic,
+               b.decimals AS base_decimals, q.decimals AS quote_decimals, o.created_at
+        FROM orders o
+        JOIN markets m ON m.id = o.market_id
+        JOIN assets b ON b.id = m.base_asset_id
+        JOIN assets q ON q.id = m.quote_asset_id
+        WHERE o.user_id = $1
+        ORDER BY o.created_at DESC, o.id DESC
+        LIMIT 200
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| ApiError::internal("ORDERS_UNAVAILABLE", "account orders could not be loaded"))?;
+    let mut orders = Vec::with_capacity(records.len());
+    for record in records {
+        let base_decimals = u8::try_from(record.base_decimals)
+            .map_err(|_| ApiError::internal("INVALID_STORED_ORDER", "invalid base precision"))?;
+        let quote_decimals = u8::try_from(record.quote_decimals)
+            .map_err(|_| ApiError::internal("INVALID_STORED_ORDER", "invalid quote precision"))?;
+        orders.push(AccountOrderResponse {
+            order_id: record.id.to_string(),
+            base: record.base,
+            quote: record.quote,
+            side: record.side.to_ascii_lowercase(),
+            kind: record.kind.to_ascii_lowercase().replace('_', "-"),
+            status: record.status.to_ascii_lowercase().replace('_', "-"),
+            original_quantity: format_response_decimal(
+                stored_atomic_to_u128(&record.original_quantity_atomic)?,
+                base_decimals,
+            )?,
+            remaining_quantity: format_response_decimal(
+                stored_atomic_to_u128(&record.remaining_quantity_atomic)?,
+                base_decimals,
+            )?,
+            price: record
+                .limit_price_atomic
+                .as_ref()
+                .map(|value| format_response_decimal(stored_atomic_to_u128(value)?, quote_decimals))
+                .transpose()?,
+            created_at: record.created_at.to_rfc3339(),
+        });
+    }
+    Ok(Json(AccountOrdersResponse { orders }))
+}
+
+#[derive(FromRow)]
+struct AccountTradeRecord {
+    id: i64,
+    base: String,
+    quote: String,
+    side: String,
+    price_atomic: BigDecimal,
+    quantity_atomic: BigDecimal,
+    base_decimals: i16,
+    quote_decimals: i16,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn account_trades(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AccountTradesResponse>, ApiError> {
+    let user_id = user_id_from_header(&headers)?;
+    let user_id = i64::try_from(user_id.value())
+        .map_err(|_| ApiError::unauthorized("INVALID_USER_ID", "X-User-Id is invalid"))?;
+    let records = sqlx::query_as::<_, AccountTradeRecord>(
+        r#"
+        SELECT t.id, b.symbol AS base, q.symbol AS quote,
+               CASE WHEN t.taker_user_id = $1 THEN t.taker_side
+                    WHEN t.taker_side = 'BUY' THEN 'SELL' ELSE 'BUY' END AS side,
+               t.price_atomic, t.quantity_atomic,
+               b.decimals AS base_decimals, q.decimals AS quote_decimals, t.created_at
+        FROM trades t
+        JOIN markets m ON m.id = t.market_id
+        JOIN assets b ON b.id = m.base_asset_id
+        JOIN assets q ON q.id = m.quote_asset_id
+        WHERE t.maker_user_id = $1 OR t.taker_user_id = $1
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT 200
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| ApiError::internal("TRADES_UNAVAILABLE", "account trades could not be loaded"))?;
+    let mut trades = Vec::with_capacity(records.len());
+    for record in records {
+        let base_decimals = u8::try_from(record.base_decimals)
+            .map_err(|_| ApiError::internal("INVALID_STORED_TRADE", "invalid base precision"))?;
+        let quote_decimals = u8::try_from(record.quote_decimals)
+            .map_err(|_| ApiError::internal("INVALID_STORED_TRADE", "invalid quote precision"))?;
+        trades.push(AccountTradeResponse {
+            trade_id: record.id.to_string(),
+            base: record.base,
+            quote: record.quote,
+            side: record.side.to_ascii_lowercase(),
+            price: format_response_decimal(
+                stored_atomic_to_u128(&record.price_atomic)?,
+                quote_decimals,
+            )?,
+            quantity: format_response_decimal(
+                stored_atomic_to_u128(&record.quantity_atomic)?,
+                base_decimals,
+            )?,
+            executed_at: record.created_at.to_rfc3339(),
+        });
+    }
+    Ok(Json(AccountTradesResponse { trades }))
+}
+
+#[derive(FromRow)]
+struct AccountBalanceRecord {
+    asset: String,
+    decimals: i16,
+    available_atomic: BigDecimal,
+    locked_atomic: BigDecimal,
+}
+
+pub async fn account_balances(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AccountBalancesResponse>, ApiError> {
+    let user_id = user_id_from_header(&headers)?;
+    let user_id = i64::try_from(user_id.value())
+        .map_err(|_| ApiError::unauthorized("INVALID_USER_ID", "X-User-Id is invalid"))?;
+    let records = sqlx::query_as::<_, AccountBalanceRecord>(
+        r#"
+        SELECT a.symbol AS asset, a.decimals, b.available_atomic, b.locked_atomic
+        FROM balances b JOIN assets a ON a.id = b.asset_id
+        WHERE b.user_id = $1 ORDER BY a.symbol
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| {
+        ApiError::internal(
+            "BALANCES_UNAVAILABLE",
+            "account balances could not be loaded",
+        )
+    })?;
+    let mut balances = Vec::with_capacity(records.len());
+    for record in records {
+        let decimals = u8::try_from(record.decimals)
+            .map_err(|_| ApiError::internal("INVALID_STORED_BALANCE", "invalid asset precision"))?;
+        balances.push(BalanceResponse {
+            asset: record.asset,
+            available: format_response_decimal(
+                stored_atomic_to_u128(&record.available_atomic)?,
+                decimals,
+            )?,
+            locked: format_response_decimal(
+                stored_atomic_to_u128(&record.locked_atomic)?,
+                decimals,
+            )?,
+        });
+    }
+    Ok(Json(AccountBalancesResponse { balances }))
+}
+
+#[derive(FromRow)]
+struct MarketStatsRecord {
+    base_decimals: i16,
+    quote_decimals: i16,
+    last_price_atomic: Option<BigDecimal>,
+    open_price_atomic: Option<BigDecimal>,
+    high_price_atomic: Option<BigDecimal>,
+    low_price_atomic: Option<BigDecimal>,
+    volume_base_atomic: Option<BigDecimal>,
+    volume_quote_atomic: Option<BigDecimal>,
+}
+
+pub async fn market_stats(
+    State(state): State<AppState>,
+    Path((base, quote)): Path<(String, String)>,
+) -> Result<Json<MarketStatsResponse>, ApiError> {
+    let record = sqlx::query_as::<_, MarketStatsRecord>(
+        r#"
+        SELECT b.decimals AS base_decimals, q.decimals AS quote_decimals,
+               m.last_trade_price_atomic AS last_price_atomic,
+               (SELECT t.price_atomic FROM trades t WHERE t.market_id = m.id AND t.created_at >= NOW() - INTERVAL '24 hours' ORDER BY t.created_at ASC, t.id ASC LIMIT 1) AS open_price_atomic,
+               (SELECT MAX(t.price_atomic) FROM trades t WHERE t.market_id = m.id AND t.created_at >= NOW() - INTERVAL '24 hours') AS high_price_atomic,
+               (SELECT MIN(t.price_atomic) FROM trades t WHERE t.market_id = m.id AND t.created_at >= NOW() - INTERVAL '24 hours') AS low_price_atomic,
+               (SELECT SUM(t.quantity_atomic) FROM trades t WHERE t.market_id = m.id AND t.created_at >= NOW() - INTERVAL '24 hours') AS volume_base_atomic,
+               (SELECT SUM(t.price_atomic * t.quantity_atomic / POWER(10::numeric, b.decimals::numeric)) FROM trades t WHERE t.market_id = m.id AND t.created_at >= NOW() - INTERVAL '24 hours') AS volume_quote_atomic
+        FROM markets m
+        JOIN assets b ON b.id = m.base_asset_id
+        JOIN assets q ON q.id = m.quote_asset_id
+        WHERE b.symbol = $1 AND q.symbol = $2
+        "#,
+    )
+    .bind(&base)
+    .bind(&quote)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| ApiError::internal("STATS_UNAVAILABLE", "market statistics could not be loaded"))?
+    .ok_or_else(|| ApiError::not_found("MARKET_NOT_FOUND", "market not found"))?;
+    let quote_decimals = u8::try_from(record.quote_decimals)
+        .map_err(|_| ApiError::internal("INVALID_STORED_MARKET", "invalid quote precision"))?;
+    let base_decimals = u8::try_from(record.base_decimals)
+        .map_err(|_| ApiError::internal("INVALID_STORED_MARKET", "invalid base precision"))?;
+    let format_price = |value: Option<BigDecimal>| -> Result<Option<String>, ApiError> {
+        value
+            .as_ref()
+            .map(|amount| format_response_decimal(stored_atomic_to_u128(amount)?, quote_decimals))
+            .transpose()
+    };
+    Ok(Json(MarketStatsResponse {
+        base,
+        quote,
+        last_price: format_price(record.last_price_atomic)?,
+        open_24h: format_price(record.open_price_atomic)?,
+        high_24h: format_price(record.high_price_atomic)?,
+        low_24h: format_price(record.low_price_atomic)?,
+        volume_24h_base: format_response_decimal(
+            record
+                .volume_base_atomic
+                .as_ref()
+                .map(stored_atomic_to_u128)
+                .transpose()?
+                .unwrap_or(0),
+            base_decimals,
+        )?,
+        volume_24h_quote: format_response_decimal(
+            record
+                .volume_quote_atomic
+                .as_ref()
+                .map(stored_atomic_to_u128)
+                .transpose()?
+                .unwrap_or(0),
+            quote_decimals,
+        )?,
     }))
 }

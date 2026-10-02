@@ -13,6 +13,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) exchange: Arc<Mutex<Exchange>>,
+    pub(crate) db: PgPool,
     pub(crate) trading_service: TradingService,
     pub(crate) admin_service: AdminService,
     pub(crate) user_service: UserService,
@@ -28,6 +29,7 @@ impl AppState {
         let market_data_service = MarketDataService::new(db.clone());
         Self {
             exchange,
+            db,
             trading_service,
             admin_service,
             user_service,

@@ -17,7 +17,12 @@ pub fn router(state: AppState) -> Router {
             "/markets/{base}/{quote}/book-ticker",
             get(handlers::book_ticker),
         )
+        .route("/markets/{base}/{quote}/stats", get(handlers::market_stats))
         .route("/orders/limit", post(handlers::place_limit_order))
+        .route("/markets/{base}/{quote}/orders", get(handlers::open_orders))
+        .route("/account/orders", get(handlers::account_orders))
+        .route("/account/trades", get(handlers::account_trades))
+        .route("/account/balances", get(handlers::account_balances))
         .route("/orders/market", post(handlers::place_market_order))
         .route("/orders/stop-limit", post(handlers::place_stop_limit_order))
         .route("/balances/{asset}", get(handlers::get_balance))

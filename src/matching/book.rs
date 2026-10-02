@@ -27,6 +27,43 @@ pub struct OrderBook {
     asks: BTreeMap<Price, PriceLevel>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepthLevel {
+    price: Price,
+    quantity: Quantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderBookDepth {
+    bids: Vec<DepthLevel>,
+    asks: Vec<DepthLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DepthError {
+    QuantityOverflow,
+}
+
+impl DepthLevel {
+    pub fn price(&self) -> Price {
+        self.price
+    }
+
+    pub fn quantity(&self) -> Quantity {
+        self.quantity
+    }
+}
+
+impl OrderBookDepth {
+    pub fn bids(&self) -> &[DepthLevel] {
+        &self.bids
+    }
+
+    pub fn asks(&self) -> &[DepthLevel] {
+        &self.asks
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct PlacementResult {
     trades: Vec<Trade>,
@@ -112,6 +149,18 @@ impl PriceLevel {
             .iter()
             .position(|order| order.id() == order_id)?;
         self.orders.remove(index)
+    }
+
+    fn total_remaining_quantity(&self) -> Result<Quantity, DepthError> {
+        let mut total = 0_u128;
+
+        for order in &self.orders {
+            total = total
+                .checked_add(order.remaining_quantity().value())
+                .ok_or(DepthError::QuantityOverflow)?;
+        }
+
+        Ok(Quantity::new(total))
     }
 }
 
@@ -295,6 +344,27 @@ impl OrderBook {
         }
 
         Err(CancelError::OrderNotFound)
+    }
+
+    pub fn depth(&self, limit: usize) -> Result<OrderBookDepth, DepthError> {
+        let mut bids = Vec::new();
+        let mut asks = Vec::new();
+
+        for (price, level) in self.bids.iter().rev().take(limit) {
+            bids.push(DepthLevel {
+                price: *price,
+                quantity: level.total_remaining_quantity()?,
+            });
+        }
+
+        for (price, level) in self.asks.iter().take(limit) {
+            asks.push(DepthLevel {
+                price: *price,
+                quantity: level.total_remaining_quantity()?,
+            });
+        }
+
+        Ok(OrderBookDepth { bids, asks })
     }
 }
 

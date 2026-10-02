@@ -155,3 +155,84 @@ pub struct DepositAssetResponse {
     pub amount: String,
     pub status: String,
 }
+
+#[derive(Serialize)]
+pub struct MarketSummaryResponse {
+    pub id: i64,
+    pub base: String,
+    pub quote: String,
+    pub price_tick: String,
+    pub quantity_step: String,
+    pub last_trade_price: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Serialize)]
+pub struct MarketsResponse {
+    pub markets: Vec<MarketSummaryResponse>,
+}
+
+#[derive(Deserialize)]
+pub struct MarketDepthQuery {
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct DepthLevelResponse {
+    pub price: String,
+    pub quantity: String,
+}
+
+#[derive(Serialize)]
+pub struct MarketDepthResponse {
+    pub base: String,
+    pub quote: String,
+    pub bids: Vec<DepthLevelResponse>,
+    pub asks: Vec<DepthLevelResponse>,
+}
+
+#[derive(Deserialize)]
+pub struct RecentTradesQuery {
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct RecentTradeResponse {
+    pub trade_id: String,
+    pub sequence: String,
+    pub price: String,
+    pub quantity: String,
+    pub taker_side: String,
+    pub executed_at: String,
+}
+
+#[derive(Serialize)]
+pub struct RecentTradesResponse {
+    pub base: String,
+    pub quote: String,
+    pub trades: Vec<RecentTradeResponse>,
+}
+
+#[derive(Deserialize)]
+pub struct CandlesQuery {
+    pub interval: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct CandleResponse {
+    pub time: i64,
+    pub open: String,
+    pub high: String,
+    pub low: String,
+    pub close: String,
+    pub volume: String,
+}
+
+#[derive(Serialize)]
+pub struct CandlesResponse {
+    pub base: String,
+    pub quote: String,
+    pub interval: String,
+    pub candles: Vec<CandleResponse>,
+}

@@ -3,7 +3,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::{
-    application::{admin::AdminService, trading::TradingService, user::UserService},
+    application::{
+        admin::AdminService, market_data::MarketDataService, trading::TradingService,
+        user::UserService,
+    },
     exchange::Exchange,
 };
 
@@ -13,6 +16,7 @@ pub struct AppState {
     pub(crate) trading_service: TradingService,
     pub(crate) admin_service: AdminService,
     pub(crate) user_service: UserService,
+    pub(crate) market_data_service: MarketDataService,
 }
 
 impl AppState {
@@ -21,11 +25,13 @@ impl AppState {
         let trading_service = TradingService::new(exchange.clone(), db.clone());
         let admin_service = AdminService::new(exchange.clone(), db.clone());
         let user_service = UserService::new(db.clone());
+        let market_data_service = MarketDataService::new(db.clone());
         Self {
             exchange,
             trading_service,
             admin_service,
             user_service,
+            market_data_service,
         }
     }
 }

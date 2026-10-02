@@ -12,7 +12,7 @@ use crate::domain::{
     trade::Trade,
 };
 use crate::matching::{
-    book::{CancelError, PlacementResult},
+    book::{CancelError, DepthError, OrderBookDepth, PlacementResult},
     market::{
         CancelledOrder, Market, MarketCreationError, MarketOrderError, MarketRestoreError,
         MarketSnapshot, QuoteAmountError,
@@ -181,6 +181,7 @@ pub enum ExchangeError {
     OrderNotOwnedByUser,
     ZeroMarketBuyBudget,
     MarketBuyBudgetExceeded,
+    Depth(DepthError),
 }
 
 impl Exchange {
@@ -191,6 +192,19 @@ impl Exchange {
             ledger: Ledger::new(),
             next_order_id: 1,
         }
+    }
+
+    pub fn market_depth(
+        &self,
+        pair: &TradingPair,
+        limit: usize,
+    ) -> Result<OrderBookDepth, ExchangeError> {
+        let market = self.markets.get(pair).ok_or(ExchangeError::UnknownMarket)?;
+
+        market
+            .order_book()
+            .depth(limit)
+            .map_err(ExchangeError::Depth)
     }
 
     pub fn register_asset(&mut self, asset: Asset) -> Result<(), ExchangeError> {

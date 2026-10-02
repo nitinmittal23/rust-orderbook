@@ -7,7 +7,10 @@ use serde::Serialize;
 
 use crate::{
     accounting::ledger::LedgerError,
-    application::{admin::AdminServiceError, trading::TradingServiceError, user::UserServiceError},
+    application::{
+        admin::AdminServiceError, market_data::MarketDataServiceError,
+        trading::TradingServiceError, user::UserServiceError,
+    },
     exchange::ExchangeError,
     matching::{book::CancelError, market::MarketOrderError},
 };
@@ -258,6 +261,37 @@ impl From<UserServiceError> for ApiError {
             ),
 
             UserServiceError::Database(_) => {
+                Self::internal("DATABASE_ERROR", "database operation failed")
+            }
+        }
+    }
+}
+
+impl From<MarketDataServiceError> for ApiError {
+    fn from(error: MarketDataServiceError) -> Self {
+        match error {
+            MarketDataServiceError::UnknownMarket => {
+                Self::not_found("MARKET_NOT_FOUND", "market not found")
+            }
+            MarketDataServiceError::InvalidStoredTrade => {
+                Self::internal("INVALID_STORED_TRADE", "persisted trade data is invalid")
+            }
+
+            MarketDataServiceError::InvalidCandleLimit => Self::bad_request(
+                "INVALID_CANDLE_LIMIT",
+                "candle limit must be between 1 and 100",
+            ),
+
+            MarketDataServiceError::InvalidCandleRange => Self::internal(
+                "INVALID_CANDLE_RANGE",
+                "candle time range could not be calculated",
+            ),
+
+            MarketDataServiceError::CandleVolumeOverflow => Self::internal(
+                "CANDLE_VOLUME_OVERFLOW",
+                "candle volume exceeded the supported range",
+            ),
+            MarketDataServiceError::Database(_) => {
                 Self::internal("DATABASE_ERROR", "database operation failed")
             }
         }

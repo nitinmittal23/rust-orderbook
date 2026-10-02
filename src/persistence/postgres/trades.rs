@@ -76,3 +76,68 @@ pub async fn insert(
     .fetch_one(connection)
     .await
 }
+
+pub async fn list_recent(
+    connection: &mut PgConnection,
+    market_id: i64,
+    limit: i64,
+) -> Result<Vec<TradeRecord>, sqlx::Error> {
+    sqlx::query_as::<_, TradeRecord>(
+        r#"
+        SELECT
+            id,
+            market_id,
+            trade_sequence,
+            maker_order_id,
+            taker_order_id,
+            maker_user_id,
+            taker_user_id,
+            taker_side,
+            price_atomic,
+            quantity_atomic,
+            created_at
+        FROM trades
+        WHERE market_id = $1
+        ORDER BY trade_sequence DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(market_id)
+    .bind(limit)
+    .fetch_all(connection)
+    .await
+}
+
+pub async fn list_between(
+    connection: &mut PgConnection,
+    market_id: i64,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<TradeRecord>, sqlx::Error> {
+    sqlx::query_as::<_, TradeRecord>(
+        r#"
+        SELECT
+            id,
+            market_id,
+            trade_sequence,
+            maker_order_id,
+            taker_order_id,
+            maker_user_id,
+            taker_user_id,
+            taker_side,
+            price_atomic,
+            quantity_atomic,
+            created_at
+        FROM trades
+        WHERE market_id = $1
+            AND created_at >= $2
+            AND created_at < $3
+        ORDER BY trade_sequence ASC
+        "#,
+    )
+    .bind(market_id)
+    .bind(start)
+    .bind(end)
+    .fetch_all(connection)
+    .await
+}

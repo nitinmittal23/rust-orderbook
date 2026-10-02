@@ -1,6 +1,9 @@
 use sqlx::{FromRow, PgConnection, types::BigDecimal};
 
-use crate::domain::primitives::{Price, Quantity};
+use crate::domain::{
+    asset::AssetSymbol,
+    primitives::{Price, Quantity},
+};
 
 #[derive(Debug)]
 pub struct MarketStateUpdate {
@@ -20,6 +23,19 @@ pub struct MarketRecord {
     pub last_trade_price_atomic: Option<BigDecimal>,
     pub next_order_sequence: i64,
     pub next_trade_sequence: i64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, FromRow)]
+pub struct MarketSummaryRecord {
+    pub id: i64,
+    pub base_symbol: String,
+    pub base_decimals: i16,
+    pub quote_symbol: String,
+    pub quote_decimals: i16,
+    pub price_tick_atomic: BigDecimal,
+    pub quantity_step_atomic: BigDecimal,
+    pub last_trade_price_atomic: Option<BigDecimal>,
     pub enabled: bool,
 }
 
@@ -131,5 +147,64 @@ pub async fn list_all(connection: &mut PgConnection) -> Result<Vec<MarketRecord>
         "#,
     )
     .fetch_all(connection)
+    .await
+}
+
+pub async fn list_summaries(
+    connection: &mut PgConnection,
+) -> Result<Vec<MarketSummaryRecord>, sqlx::Error> {
+    sqlx::query_as::<_, MarketSummaryRecord>(
+        r#"
+        SELECT
+            market.id,
+            base_asset.symbol AS base_symbol,
+            base_asset.decimals AS base_decimals,
+            quote_asset.symbol AS quote_symbol,
+            quote_asset.decimals AS quote_decimals,
+            market.price_tick_atomic,
+            market.quantity_step_atomic,
+            market.last_trade_price_atomic,
+            market.enabled
+        FROM markets AS market
+        JOIN assets AS base_asset
+            ON base_asset.id = market.base_asset_id
+        JOIN assets AS quote_asset
+            ON quote_asset.id = market.quote_asset_id
+        ORDER BY market.id ASC
+        "#,
+    )
+    .fetch_all(connection)
+    .await
+}
+
+pub async fn find_summary_by_symbols(
+    connection: &mut PgConnection,
+    base_symbol: &AssetSymbol,
+    quote_symbol: &AssetSymbol,
+) -> Result<Option<MarketSummaryRecord>, sqlx::Error> {
+    sqlx::query_as::<_, MarketSummaryRecord>(
+        r#"
+        SELECT
+            market.id,
+            base_asset.symbol AS base_symbol,
+            base_asset.decimals AS base_decimals,
+            quote_asset.symbol AS quote_symbol,
+            quote_asset.decimals AS quote_decimals,
+            market.price_tick_atomic,
+            market.quantity_step_atomic,
+            market.last_trade_price_atomic,
+            market.enabled
+        FROM markets AS market
+        JOIN assets AS base_asset
+            ON base_asset.id = market.base_asset_id
+        JOIN assets AS quote_asset
+            ON quote_asset.id = market.quote_asset_id
+        WHERE base_asset.symbol = $1
+          AND quote_asset.symbol = $2
+        "#,
+    )
+    .bind(base_symbol.as_str())
+    .bind(quote_symbol.as_str())
+    .fetch_optional(connection)
     .await
 }

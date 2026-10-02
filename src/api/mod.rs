@@ -32,5 +32,15 @@ pub fn router(state: AppState) -> Router {
             "/admin/users/{user_id}/deposits",
             post(handlers::deposit_asset),
         )
+        .route("/markets", get(handlers::list_markets))
+        .route("/markets/{base}/{quote}/depth", get(handlers::market_depth))
+        .route(
+            "/markets/{base}/{quote}/trades",
+            get(handlers::recent_trades),
+        )
+        .route(
+            "/markets/{base}/{quote}/candles",
+            get(handlers::get_candles),
+        )
         .with_state(state)
 }

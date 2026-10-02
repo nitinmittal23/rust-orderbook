@@ -1,8 +1,10 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
+use num_traits::ToPrimitive;
+use sqlx::types::BigDecimal;
 use uuid::Uuid;
 
 use crate::{
@@ -18,11 +20,13 @@ use crate::{
 use super::{
     decimal::{format_decimal, parse_decimal},
     dto::{
-        AssetResponse, BalanceResponse, BookTickerResponse, CancelOrderResponse,
-        CreateAssetRequest, CreateMarketRequest, CreateUserRequest, DepositAssetRequest,
-        DepositAssetResponse, MarketResponse, OrderPlacementResponse, PlaceLimitOrderRequest,
-        PlaceMarketOrderRequest, PlaceStopLimitOrderRequest, PlaceStopLimitOrderResponse,
-        TradeResponse, UserResponse,
+        AssetResponse, BalanceResponse, BookTickerResponse, CancelOrderResponse, CandleResponse,
+        CandlesQuery, CandlesResponse, CreateAssetRequest, CreateMarketRequest, CreateUserRequest,
+        DepositAssetRequest, DepositAssetResponse, DepthLevelResponse, MarketDepthQuery,
+        MarketDepthResponse, MarketResponse, MarketSummaryResponse, MarketsResponse,
+        OrderPlacementResponse, PlaceLimitOrderRequest, PlaceMarketOrderRequest,
+        PlaceStopLimitOrderRequest, PlaceStopLimitOrderResponse, RecentTradeResponse,
+        RecentTradesQuery, RecentTradesResponse, TradeResponse, UserResponse,
     },
     error::ApiError,
     state::AppState,
@@ -762,4 +766,275 @@ pub async fn deposit_asset(
     };
 
     Ok((StatusCode::OK, Json(response)))
+}
+
+fn stored_atomic_to_u128(value: &BigDecimal) -> Result<u128, ApiError> {
+    value.to_u128().ok_or_else(|| {
+        ApiError::internal("INVALID_STORED_AMOUNT", "stored atomic amount is invalid")
+    })
+}
+
+pub async fn list_markets(
+    State(state): State<AppState>,
+) -> Result<Json<MarketsResponse>, ApiError> {
+    let records = state
+        .market_data_service
+        .list_markets()
+        .await
+        .map_err(ApiError::from)?;
+    let mut markets = Vec::with_capacity(records.len());
+
+    for record in records {
+        let base_decimals = u8::try_from(record.base_decimals).map_err(|_| {
+            ApiError::internal(
+                "INVALID_STORED_MARKET",
+                "stored base asset decimals are invalid",
+            )
+        })?;
+
+        let quote_decimals = u8::try_from(record.quote_decimals).map_err(|_| {
+            ApiError::internal(
+                "INVALID_STORED_MARKET",
+                "stored quote asset decimals are invalid",
+            )
+        })?;
+
+        let price_tick = format_response_decimal(
+            stored_atomic_to_u128(&record.price_tick_atomic)?,
+            quote_decimals,
+        )?;
+
+        let quantity_step = format_response_decimal(
+            stored_atomic_to_u128(&record.quantity_step_atomic)?,
+            base_decimals,
+        )?;
+
+        let last_trade_price = match &record.last_trade_price_atomic {
+            Some(value) => Some(format_response_decimal(
+                stored_atomic_to_u128(value)?,
+                quote_decimals,
+            )?),
+            None => None,
+        };
+
+        markets.push(MarketSummaryResponse {
+            id: record.id,
+            base: record.base_symbol,
+            quote: record.quote_symbol,
+            price_tick,
+            quantity_step,
+            last_trade_price,
+            enabled: record.enabled,
+        });
+    }
+
+    Ok(Json(MarketsResponse { markets }))
+}
+
+pub async fn market_depth(
+    State(state): State<AppState>,
+    Path((base, quote)): Path<(String, String)>,
+    Query(query): Query<MarketDepthQuery>,
+) -> Result<Json<MarketDepthResponse>, ApiError> {
+    let base_symbol = AssetSymbol::new(&base)
+        .map_err(|_| ApiError::bad_request("INVALID_BASE_SYMBOL", "invalid base symbol"))?;
+
+    let quote_symbol = AssetSymbol::new(&quote)
+        .map_err(|_| ApiError::bad_request("INVALID_QUOTE_SYMBOL", "invalid quote symbol"))?;
+
+    let pair = TradingPair::new(base_symbol, quote_symbol)
+        .map_err(|_| ApiError::bad_request("INVALID_TRADING_PAIR", "invalid trading pair"))?;
+
+    let limit = query.limit.unwrap_or(20);
+
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "INVALID_DEPTH_LIMIT",
+            "depth limit must be between 1 and 100",
+        ));
+    }
+
+    let (depth, base_decimals, quote_decimals) = {
+        let exchange = state.exchange.lock().await;
+
+        let base_decimals = exchange
+            .asset(pair.base())
+            .ok_or_else(|| ApiError::not_found("ASSET_NOT_FOUND", "base asset not found"))?
+            .decimals();
+
+        let quote_decimals = exchange
+            .asset(pair.quote())
+            .ok_or_else(|| ApiError::not_found("ASSET_NOT_FOUND", "quote asset not found"))?
+            .decimals();
+
+        let depth = exchange
+            .market_depth(&pair, limit)
+            .map_err(ApiError::from)?;
+
+        (depth, base_decimals, quote_decimals)
+    };
+
+    let mut bids = Vec::with_capacity(depth.bids().len());
+
+    for level in depth.bids() {
+        bids.push(DepthLevelResponse {
+            price: format_response_decimal(level.price().value(), quote_decimals)?,
+            quantity: format_response_decimal(level.quantity().value(), base_decimals)?,
+        });
+    }
+
+    let mut asks = Vec::with_capacity(depth.asks().len());
+
+    for level in depth.asks() {
+        asks.push(DepthLevelResponse {
+            price: format_response_decimal(level.price().value(), quote_decimals)?,
+            quantity: format_response_decimal(level.quantity().value(), base_decimals)?,
+        });
+    }
+
+    Ok(Json(MarketDepthResponse {
+        base: pair.base().as_str().to_string(),
+        quote: pair.quote().as_str().to_string(),
+        bids,
+        asks,
+    }))
+}
+
+pub async fn recent_trades(
+    State(state): State<AppState>,
+    Path((base, quote)): Path<(String, String)>,
+    Query(query): Query<RecentTradesQuery>,
+) -> Result<Json<RecentTradesResponse>, ApiError> {
+    let base_symbol = AssetSymbol::new(&base)
+        .map_err(|_| ApiError::bad_request("INVALID_BASE_SYMBOL", "invalid base symbol"))?;
+
+    let quote_symbol = AssetSymbol::new(&quote)
+        .map_err(|_| ApiError::bad_request("INVALID_QUOTE_SYMBOL", "invalid quote symbol"))?;
+
+    let pair = TradingPair::new(base_symbol, quote_symbol)
+        .map_err(|_| ApiError::bad_request("INVALID_TRADING_PAIR", "invalid trading pair"))?;
+
+    let limit = query.limit.unwrap_or(50);
+
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "INVALID_TRADES_LIMIT",
+            "recent trades limit must be between 1 and 100",
+        ));
+    }
+
+    let result = state
+        .market_data_service
+        .recent_trades(&pair, limit)
+        .await
+        .map_err(ApiError::from)?;
+
+    let (market, records) = result.into_parts();
+
+    let base_decimals = u8::try_from(market.base_decimals).map_err(|_| {
+        ApiError::internal(
+            "INVALID_STORED_MARKET",
+            "stored base asset decimals are invalid",
+        )
+    })?;
+
+    let quote_decimals = u8::try_from(market.quote_decimals).map_err(|_| {
+        ApiError::internal(
+            "INVALID_STORED_MARKET",
+            "stored quote asset decimals are invalid",
+        )
+    })?;
+
+    let mut trades = Vec::with_capacity(records.len());
+
+    for record in records {
+        trades.push(RecentTradeResponse {
+            trade_id: record.id.to_string(),
+            sequence: record.trade_sequence.to_string(),
+            price: format_response_decimal(
+                stored_atomic_to_u128(&record.price_atomic)?,
+                quote_decimals,
+            )?,
+            quantity: format_response_decimal(
+                stored_atomic_to_u128(&record.quantity_atomic)?,
+                base_decimals,
+            )?,
+            taker_side: record.taker_side,
+            executed_at: record.created_at.to_rfc3339(),
+        });
+    }
+
+    Ok(Json(RecentTradesResponse {
+        base: market.base_symbol,
+        quote: market.quote_symbol,
+        trades,
+    }))
+}
+
+pub async fn get_candles(
+    State(state): State<AppState>,
+    Path((base, quote)): Path<(String, String)>,
+    Query(query): Query<CandlesQuery>,
+) -> Result<Json<CandlesResponse>, ApiError> {
+    let interval = query.interval.unwrap_or_else(|| "1m".to_string());
+
+    if interval != "1m" {
+        return Err(ApiError::bad_request(
+            "UNSUPPORTED_CANDLE_INTERVAL",
+            "only the 1m candle interval is currently supported",
+        ));
+    }
+
+    let limit = query.limit.unwrap_or(100);
+
+    let base_symbol = AssetSymbol::new(&base)
+        .map_err(|_| ApiError::bad_request("INVALID_BASE_SYMBOL", "invalid base symbol"))?;
+
+    let quote_symbol = AssetSymbol::new(&quote)
+        .map_err(|_| ApiError::bad_request("INVALID_QUOTE_SYMBOL", "invalid quote symbol"))?;
+
+    let pair = TradingPair::new(base_symbol, quote_symbol)
+        .map_err(|_| ApiError::bad_request("INVALID_TRADING_PAIR", "invalid trading pair"))?;
+
+    let result = state
+        .market_data_service
+        .minute_candles(&pair, limit)
+        .await
+        .map_err(ApiError::from)?;
+
+    let (market, candle_records) = result.into_parts();
+
+    let base_decimals = u8::try_from(market.base_decimals).map_err(|_| {
+        ApiError::internal(
+            "INVALID_STORED_MARKET",
+            "stored base asset decimals are invalid",
+        )
+    })?;
+
+    let quote_decimals = u8::try_from(market.quote_decimals).map_err(|_| {
+        ApiError::internal(
+            "INVALID_STORED_MARKET",
+            "stored quote asset decimals are invalid",
+        )
+    })?;
+
+    let mut candles = Vec::with_capacity(candle_records.len());
+
+    for candle in candle_records {
+        candles.push(CandleResponse {
+            time: candle.start_time().timestamp(),
+            open: format_response_decimal(candle.open().value(), quote_decimals)?,
+            high: format_response_decimal(candle.high().value(), quote_decimals)?,
+            low: format_response_decimal(candle.low().value(), quote_decimals)?,
+            close: format_response_decimal(candle.close().value(), quote_decimals)?,
+            volume: format_response_decimal(candle.volume().value(), base_decimals)?,
+        });
+    }
+
+    Ok(Json(CandlesResponse {
+        base: market.base_symbol,
+        quote: market.quote_symbol,
+        interval,
+        candles,
+    }))
 }
